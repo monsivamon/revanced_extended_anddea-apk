@@ -10,10 +10,7 @@ from apkmirror import Version, Variant
 from utils import panic, publish_release, patch_apk
 from download_bins import download_morphe_cli, download_release_asset
 
-
-
 # [STEP 1] JSON解析: Anddeaのパッチ情報からターゲットバージョンと全パッチリストを取得
-
 def get_target_data() -> dict:
     url = "https://raw.githubusercontent.com/anddea/revanced-patches/main/patches.json"
     print("  -> Fetching patches.json from Anddea's repository...")
@@ -51,46 +48,38 @@ def get_target_data() -> dict:
         "ytmusic": {"version": ytmusic_version, "patches": ytmusic_patches}
     }
 
-
-
-# [STEP 2] APK取得: APKMirrorから「指定バージョン」の「通常APK」を探す
-
-def get_target_apk_variant(base_url: str, target_version: str) -> tuple[Version | None, Variant | None]:
-    print(f"  -> Scanning APKMirror for target version: {target_version}")
+# [STEP 2] APK取得: リスト画面を無視し、URLを予測して直接狙い撃つ（スナイパーモード）
+def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> tuple[Version | None, Variant | None]:
+    print(f"  -> [SNIPER MODE] Predicting direct URL for {app_id} v{target_version}...")
     
+    # バージョンのドットをハイフンに変換 (例: 20.05.46 -> 20-05-46)
+    slug_version = target_version.replace('.', '-')
+    
+    # 考えられるURLパターンのリスト（APKMirrorは -release が付く場合と付かない場合がある）
+    urls_to_try = [
+        f"{base_url}{app_id}-{slug_version}-release/",
+        f"{base_url}{app_id}-{slug_version}/"
+    ]
+    
+    variants = []
     target_v = None
-    # YouTubeはアプデ頻度が異常なため、最大10ページ目まで遡って探す
-    for page in range(1, 11):
-        page_url = f"{base_url}page/{page}/" if page > 1 else base_url
-        if page > 1:
-            print(f"  -> Not found on previous page. Scanning page {page}...")
-            time.sleep(1) # ページ遷移前に1秒待機（Bot検知回避）
-            
-        try:
-            versions = apkmirror.get_versions(page_url)
-        except Exception as e:
-            print(f"  -> Failed to fetch page {page}: {e}")
-            break
-            
-        for v in versions:
-            if target_version in v.version:
-                target_v = v
-                break # 見つかったら内側のループを抜ける
-                
-        if target_v:
-            break # 見つかったら外側のページループも抜ける
-
-    if not target_v:
-        print(f"  -> [WARNING] Version {target_version} not found on APKMirror after checking 5 pages.")
-        return None, None
-
-    print(f"  -> [SUCCESS] Target version found on APKMirror: {target_v.version}")
-    time.sleep(1)
     
-    try:
-        variants = apkmirror.get_variants(target_v)
-    except Exception as e:
-        print(f"  -> Failed to fetch variants: {e}")
+    for url in urls_to_try:
+        print(f"  -> Trying direct link: {url}")
+        target_v = Version(version=target_version, link=url)
+        try:
+            # リスト画面を通さず、いきなりバリアント取得関数に突撃する
+            variants = apkmirror.get_variants(target_v)
+            if variants:
+                print("  -> [SUCCESS] Direct link hit! Found variants.")
+                break # 見つかったらURL試行ループを抜ける
+        except Exception as e:
+            print(f"  -> Failed or Not Found: {e}")
+            time.sleep(1) # 次のURLパターンを試す前に1秒待機
+            continue
+
+    if not variants:
+        print(f"  -> [WARNING] Could not snipe the URL for {target_version}. Cloudflare block or wrong version.")
         return None, None
 
     # Bundleを避け、nodpi, universal, または arm64 の通常APKを探す
@@ -104,10 +93,7 @@ def get_target_apk_variant(base_url: str, target_version: str) -> tuple[Version 
     print(f"  -> [WARNING] No valid normal APK (non-bundle) found for {target_version}.")
     return None, None
 
-
-
 # [STEP 3] ビルド実行: 脳死全適用（強制フルパッチ）モード
-
 def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     patches = "bins/patches.mpp"
     cli = "bins/morphe-cli.jar"
@@ -136,10 +122,7 @@ def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     print(f"  -> [SUCCESS] {output_apk} successfully built!")
     return output_apk
 
-
-
 # [STEP 4] 処理統合: ダウンロード〜ビルド〜リリースのパイプライン
-
 def process(patch_version: str, rvxRelease, target_data: dict, yt_variant: Variant, ytm_variant: Variant):
     print("\n[STEP 4] Downloading base APKs (Directly to .apk, no merge needed)...")
     
@@ -179,8 +162,7 @@ def process(patch_version: str, rvxRelease, target_data: dict, yt_variant: Varia
     )
     print("  -> [DONE] Release successfully published!")
 
-
-# バージョンの新旧比較ロジック（そのまま流用・v4.0.0-dev.5形式にも完全対応）
+# バージョンの新旧比較ロジック
 def version_greater(v1: str, v2: str) -> bool:
     print(f"\n[DEBUG] Comparing: '{v1}' > '{v2}' ?")
 
@@ -214,9 +196,7 @@ def version_greater(v1: str, v2: str) -> bool:
     return v1 > v2
 
 # メインシーケンス
-
 def main():
-
     repo_url: str = "monsivamon/revanced_extended_anddea-apk" 
     yt_url: str = "https://www.apkmirror.com/apk/google-inc/youtube/"
     ytm_url: str = "https://www.apkmirror.com/apk/google-inc/youtube-music/"
@@ -263,9 +243,9 @@ def main():
     print(f"  -> Target YouTube version: {yt_target_ver}")
     print(f"  -> Target YT Music version: {ytm_target_ver}")
 
-    # 4. APKMirrorから指定バージョンの通常APKをピンポイントで探す
-    yt_v, yt_variant = get_target_apk_variant(yt_url, yt_target_ver)
-    ytm_v, ytm_variant = get_target_apk_variant(ytm_url, ytm_target_ver)
+    # 4. APKMirrorから指定バージョンの通常APKをピンポイントで探す (スナイパーモード)
+    yt_v, yt_variant = get_target_apk_variant(yt_url, yt_target_ver, "youtube")
+    ytm_v, ytm_variant = get_target_apk_variant(ytm_url, ytm_target_ver, "youtube-music")
 
     if not yt_variant and not ytm_variant:
         print("  -> [EXIT] Could not find any valid APK variants on APKMirror.")
@@ -273,7 +253,6 @@ def main():
 
     # 5. すべての準備が整ったらビルドパイプラインへ！
     process(final_patch_ver, rvxRelease, target_data, yt_variant, ytm_variant)
-
 
 if __name__ == "__main__":
     main()
