@@ -9,6 +9,10 @@ The core mechanism of this builder is based on [monsivamon/twitter-apk](https://
 ## ⚠️ Disclaimer
 **App stability is NOT guaranteed.** This build system is configured to automatically force-apply **ALL available patches** for the target applications. Because it blindly applies every patch without selective configuration, unexpected bugs or crashes may occur. Use at your own risk.
 
+## ⚠️ Requirements
+To use the patched YouTube and YouTube Music apps and log in with your Google account, you **MUST** install MicroG (GmsCore). 
+We highly recommend using **[MicroG-RE](https://github.com/MorpheApp/MicroG-RE)** provided by the Morphe team.
+
 ## ✨ Key Features & Improvements
 
 ### 1. Always Latest Patches
