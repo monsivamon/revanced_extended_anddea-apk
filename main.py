@@ -1,107 +1,172 @@
 import os
 import re
 import time
+import json
+import urllib.request
 import apkmirror
 import github
 
 from apkmirror import Version, Variant
-from build_variants import build_apks
-from download_bins import download_apkeditor, download_morphe_cli, download_release_asset
-from utils import panic, merge_apk, publish_release
+from utils import panic, publish_release, patch_apk
+from download_bins import download_morphe_cli, download_release_asset
 
 
-# APKMirrorのバージョン一覧から「Universal Bundleが確実に存在する最新のリリース」を探して返す。
-# ※アクセス制限（Bot検知）を防ぐため、1秒のウェイトを挟みながら最大10件まで探索する安全設計。
-def get_latest_valid_release(versions: list[Version]) -> tuple[Version | None, Variant | None]:
-    check_count = 0
-    for i in versions:
-        # release版だけを対象にする（alphaやbetaはこの時点でスルーされるためカウントも消費しない）
-        if i.version.find("release") >= 0:
-            check_count += 1
-            print(f"  -> Checking ({check_count}/10): {i.version}")
-            
-            try:
-                variants = apkmirror.get_variants(i)
-            except Exception as e:
-                print(f"  -> Failed to fetch variants: {e}")
-                continue
 
-            for variant in variants:
-                if variant.is_bundle and variant.architecture == "universal":
-                    print(f"  -> [SUCCESS] Universal bundle found: {i.version}")
-                    return i, variant
+# [STEP 1] JSON解析: Anddeaのパッチ情報からターゲットバージョンと全パッチリストを取得
+
+def get_target_data() -> dict:
+    url = "https://raw.githubusercontent.com/anddea/revanced-patches/main/patches.json"
+    print("  -> Fetching patches.json from Anddea's repository...")
+    
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req) as response:
+        data = json.loads(response.read().decode('utf-8'))
+        
+    youtube_version = None
+    ytmusic_version = None
+    youtube_patches = []
+    ytmusic_patches = []
+
+    for patch in data:
+        patch_name = patch.get("name")
+        compat = patch.get("compatiblePackages")
+        
+        if isinstance(compat, dict):
+            # YouTube の情報を抽出
+            if "com.google.android.youtube" in compat:
+                youtube_patches.append(patch_name)
+                versions = compat["com.google.android.youtube"]
+                if isinstance(versions, list) and len(versions) > 0:
+                    youtube_version = versions[-1]
             
-            print(f"  -> No universal bundle found. Trying next version...")
+            # YouTube Music の情報を抽出
+            if "com.google.android.apps.youtube.music" in compat:
+                ytmusic_patches.append(patch_name)
+                versions = compat["com.google.android.apps.youtube.music"]
+                if isinstance(versions, list) and len(versions) > 0:
+                    ytmusic_version = versions[-1]
+
+    return {
+        "youtube": {"version": youtube_version, "patches": youtube_patches},
+        "ytmusic": {"version": ytmusic_version, "patches": ytmusic_patches}
+    }
+
+
+
+# [STEP 2] APK取得: APKMirrorから「指定バージョン」の「通常APK」を探す
+
+def get_target_apk_variant(base_url: str, target_version: str) -> tuple[Version | None, Variant | None]:
+    print(f"  -> Scanning APKMirror for target version: {target_version}")
+    versions = apkmirror.get_versions(base_url)
+    
+    # ターゲットバージョンに合致するリリースを探す（"19.05.36" など）
+    target_v = None
+    for v in versions:
+        if target_version in v.version:
+            target_v = v
+            break
             
-            # API制限対策: 最大10件まで探して見つからなければ諦める
-            if check_count >= 10:
-                print("  -> [WARNING] Checked top 10 releases but found no bundles. Giving up to prevent rate limits.")
-                break
-            
-            # Bot判定回避のため、次のページを見に行く前に1秒待つ
-            time.sleep(1)
+    if not target_v:
+        print(f"  -> [WARNING] Version {target_version} not found on APKMirror.")
+        return None, None
+
+    # Bot判定回避のため1秒待機
+    time.sleep(1)
+    
+    try:
+        variants = apkmirror.get_variants(target_v)
+    except Exception as e:
+        print(f"  -> Failed to fetch variants: {e}")
+        return None, None
+
+    # Bundleを避け、nodpi, universal, または arm64 の通常APKを探す
+    for variant in variants:
+        if not variant.is_bundle:
+            arch = variant.architecture.lower()
+            if "nodpi" in arch or "universal" in arch or "arm64" in arch:
+                print(f"  -> [SUCCESS] Valid normal APK found: {arch}")
+                return target_v, variant
                 
+    print(f"  -> [WARNING] No valid normal APK (non-bundle) found for {target_version}.")
     return None, None
 
 
-# ビルドのメインパイプライン。
-# 既に検証済みの download_link (Variant) を受け取り、ダウンロードからリリースまでを行う。
-def process(latest_version: Version, pikoRelease, download_link: Variant):
-    print("\n[STEP 4] Downloading APK and tools...")
-    
-    # 1. APKのダウンロード
-    print(f"  -> Downloading {latest_version.version} bundle from APKMirror...")
-    apkmirror.download_apk(download_link)
-    if not os.path.exists("big_file.apkm"):
-        panic("  -> [ERROR] Failed to download APK.")
 
-    # 2. 結合ツールのダウンロードとAPKのマージ
-    print("  -> Downloading APKEditor...")
-    download_apkeditor()
-    if not os.path.exists("big_file_merged.apk"):
-        print("  -> Merging APK (big_file.apkm -> big_file_merged.apk)...")
-        merge_apk("big_file.apkm")
-    else:
-        print("  -> Merged APK already exists. Skipping merge.")
+# [STEP 3] ビルド実行: 脳死全適用（強制フルパッチ）モード
+
+def build_target_apk(target_name: str, target_data: dict, input_apk: str):
+    patches = "bins/patches.mpp"
+    cli = "bins/morphe-cli.jar"
+    
+    version = target_data["version"]
+    all_patches = target_data["patches"]
+    
+    output_apk = f"{target_name}-rvx-v{version}.apk"
+    print(f"  -> Building {output_apk} (Force applying {len(all_patches)} patches)...")
+
+    # もし将来的に「このパッチを入れるとエラーで落ちる」という競合パッチがあれば、
+    # この exclude_list にパッチ名を文字列で追加してください。（例: ["Custom icon"]）
+    exclude_list = []
+
+    # リストにある全パッチを includes に突っ込んで強制適用
+    patch_apk(
+        cli, patches, input_apk,
+        includes=all_patches,
+        excludes=exclude_list,
+        out=output_apk,
+    )
+    
+    if not os.path.exists(output_apk):
+        panic(f"  -> [ERROR] Failed to build {output_apk}")
+        
+    print(f"  -> [SUCCESS] {output_apk} successfully built!")
+    return output_apk
+
+
+
+# [STEP 4] 処理統合: ダウンロード〜ビルド〜リリースのパイプライン
+
+def process(patch_version: str, rvxRelease, target_data: dict, yt_variant: Variant, ytm_variant: Variant):
+    print("\n[STEP 4] Downloading base APKs (Directly to .apk, no merge needed)...")
+    
+    if yt_variant:
+        print("  -> Downloading YouTube base APK...")
+        apkmirror.download_apk(yt_variant, path="youtube_base.apk")
+    if ytm_variant:
+        print("  -> Downloading YouTube Music base APK...")
+        apkmirror.download_apk(ytm_variant, path="ytmusic_base.apk")
 
     print("\n[STEP 5] Preparing Morphe CLI...")
-    # 3. パッチツール (Morphe CLI) のダウンロード
     download_morphe_cli()
     
-    message: str = f"""
-Changelogs:
-[piko-{pikoRelease["tag_name"]}]({pikoRelease["html_url"]})
-"""
+    print(f"\n[STEP 6] Building patched APKs...")
+    outputs = []
+    
+    if os.path.exists("youtube_base.apk"):
+        out = build_target_apk("youtube", target_data["youtube"], "youtube_base.apk")
+        outputs.append(out)
+        
+    if os.path.exists("ytmusic_base.apk"):
+        out = build_target_apk("ytmusic", target_data["ytmusic"], "ytmusic_base.apk")
+        outputs.append(out)
 
-    print(f"\n[STEP 6] Building patched APKs (Target: {latest_version.version})...")
-    # 4. バリアントごとのパッチ適用
-    build_apks(latest_version)
+    if not outputs:
+        panic("  -> [ERROR] No APKs were built.")
 
-    print("\n[STEP 7] Publishing release to GitHub...")
-    # 5. GitHubへ完成したAPKをリリース
+    print(f"\n[STEP 7] Publishing release to GitHub (Tag: {patch_version})...")
+    # リリースノート（Changelogへのリンク）
+    message: str = f"Changelogs:\n[Anddea RVX {patch_version}]({rvxRelease['html_url']})"
+    
     publish_release(
-        latest_version.version,
-        [
-            f"x-piko-v{latest_version.version}.apk",
-            f"x-piko-material-you-v{latest_version.version}.apk",
-            f"twitter-piko-v{latest_version.version}.apk",
-            f"twitter-piko-material-you-v{latest_version.version}.apk",
-        ],
+        patch_version,          # タグ名は「Anddeaのパッチバージョン」にする
+        outputs,                # 生成された youtube-rvx-xxx.apk と ytmusic-rvx-xxx.apk
         message,
-        latest_version.version
+        f"RVX {patch_version}"  # リリース名
     )
     print("  -> [DONE] Release successfully published!")
 
 
-# 過去のGitHubリリースの本文から、適用されたPikoパッチのバージョンを抽出する。
-def extract_piko_version(body: str) -> str | None:
-    m = re.search(r"piko-(v[\w\.\-]+)", body, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    return None
-
-
-# バージョンの新旧を比較する（v1 > v2 なら True）。
+# バージョンの新旧比較ロジック（そのまま流用・v4.0.0-dev.5形式にも完全対応）
 def version_greater(v1: str, v2: str) -> bool:
     print(f"\n[DEBUG] Comparing: '{v1}' > '{v2}' ?")
 
@@ -134,74 +199,66 @@ def version_greater(v1: str, v2: str) -> bool:
 
     return v1 > v2
 
+# メインシーケンス
 
-# 自動実行モード。
-# Twitter APKとPikoパッチの更新状況を確認し、新しいものがあればビルド処理を走らせる。
 def main():
-    url: str = "https://www.apkmirror.com/apk/x-corp/twitter/"
-    repo_url: str = "monsivamon/twitter-apk"
 
-    print("\n[STEP 1] Scanning APKMirror for the latest valid release (Bundle)...")
-    # 1. 最新バージョンの取得とチェック
-    versions = apkmirror.get_versions(url)
-    latest_version, bundle_variant = get_latest_valid_release(versions)
-    
-    if latest_version is None or bundle_variant is None:
-        print("  -> [EXIT] No release with a universal bundle found. Skipping for now.")
-        return
+    repo_url: str = "monsivamon/revanced_extended_anddea-apk" 
+    yt_url: str = "https://www.apkmirror.com/apk/google-inc/youtube/"
+    ytm_url: str = "https://www.apkmirror.com/apk/google-inc/youtube-music/"
 
-    print("\n[STEP 2] Fetching the latest Piko patches from GitHub...")
-    # 2. Pikoパッチの最新版を取得
-    pikoRelease = download_release_asset(
-        "crimera/piko",
+    print("\n[STEP 1] Fetching the latest RVX (Anddea) patches from GitHub...")
+    # 1. 最新のAnddeaパッチ(.mpp)を取得
+    rvxRelease = download_release_asset(
+        "anddea/revanced-patches",
         r".*\.mpp$",
         "bins",
         "patches.mpp",
         include_prereleases=True
     )
-    final_piko = pikoRelease["tag_name"]
-    print(f"  -> Latest Piko patch: {final_piko}")
+    final_patch_ver = rvxRelease["tag_name"]
+    print(f"  -> Latest RVX patch: {final_patch_ver}")
 
-    print("\n[STEP 3] Verifying build history for updates...")
-    last_build_version: github.GithubRelease | None = github.get_last_build_version(repo_url)
-        
-    final_apk = latest_version.version
+    print("\n[STEP 2] Verifying build history for updates...")
+    # 2. 過去のビルド（自分のリポジトリの最新タグ）と比較する
+    last_build_version = github.get_last_build_version(repo_url)
+    last_ver_patch = last_build_version.tag_name if last_build_version else None
 
-    # 3. 初回ビルド時の処理
-    if last_build_version is None:
+    print(f"  -> Target Patch: {final_patch_ver}")
+    print(f"  -> Previous Build Patch: {last_ver_patch}")
+
+    is_new_patch = False
+    if last_ver_patch is None:
         print("  -> No previous release found. Treating as initial build.")
-        process(latest_version, pikoRelease, bundle_variant)
-        return
-
-    # 4. 更新判定ロジック
-    last_ver_apk = last_build_version.tag_name
-    last_ver_piko = extract_piko_version(last_build_version.body or "")
-    
-    print(f"  -> Target APK: {final_apk}")
-    print(f"  -> Target Piko: {final_piko}")
-    print(f"  -> Previous Build APK: {last_ver_apk}")
-    print(f"  -> Previous Build Piko: {last_ver_piko}")
-    
-    apk_is_new = version_greater(final_apk, last_ver_apk)
-
-    if last_ver_piko is None:
-        print("  -> Previous Piko version is unknown. Treating as new.")
-        piko_is_new = True
+        is_new_patch = True
     else:
-        piko_is_new = version_greater(final_piko, last_ver_piko)
+        is_new_patch = version_greater(final_patch_ver, last_ver_patch)
 
-    if not apk_is_new and not piko_is_new:
-        print("\n  -> [EXIT] No updates for APK or Piko. Skipping build.")
+    # アプリのバージョンアップは無視し、パッチの更新がなければ終了する
+    if not is_new_patch:
+        print("\n  -> [EXIT] No updates for RVX patches. Skipping build.")
         return
-        
-    print("\n  -> [RESULT] Update detected! Initiating build sequence.")
-    if apk_is_new:
-        print(f"     APK Update:  {last_ver_apk} -> {final_apk}")
-    if piko_is_new:
-        print(f"     Piko Update: {last_ver_piko} -> {final_piko}")
-        
-    # 5. 更新があればビルド開始
-    process(latest_version, pikoRelease, bundle_variant)
+
+    print("\n  -> [RESULT] Patch update detected! Initiating build sequence.")
+
+    print("\n[STEP 3] Fetching target APK versions from patches.json...")
+    # 3. JSONからバージョンとパッチリストを取得
+    target_data = get_target_data()
+    yt_target_ver = target_data["youtube"]["version"]
+    ytm_target_ver = target_data["ytmusic"]["version"]
+    print(f"  -> Target YouTube version: {yt_target_ver}")
+    print(f"  -> Target YT Music version: {ytm_target_ver}")
+
+    # 4. APKMirrorから指定バージョンの通常APKをピンポイントで探す
+    yt_v, yt_variant = get_target_apk_variant(yt_url, yt_target_ver)
+    ytm_v, ytm_variant = get_target_apk_variant(ytm_url, ytm_target_ver)
+
+    if not yt_variant and not ytm_variant:
+        print("  -> [EXIT] Could not find any valid APK variants on APKMirror.")
+        return
+
+    # 5. すべての準備が整ったらビルドパイプラインへ！
+    process(final_patch_ver, rvxRelease, target_data, yt_variant, ytm_variant)
 
 
 if __name__ == "__main__":
