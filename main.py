@@ -57,20 +57,34 @@ def get_target_data() -> dict:
 
 def get_target_apk_variant(base_url: str, target_version: str) -> tuple[Version | None, Variant | None]:
     print(f"  -> Scanning APKMirror for target version: {target_version}")
-    versions = apkmirror.get_versions(base_url)
     
-    # ターゲットバージョンに合致するリリースを探す（"19.05.36" など）
     target_v = None
-    for v in versions:
-        if target_version in v.version:
-            target_v = v
+    # YouTubeはアプデ頻度が異常なため、最大10ページ目まで遡って探す
+    for page in range(1, 11):
+        page_url = f"{base_url}page/{page}/" if page > 1 else base_url
+        if page > 1:
+            print(f"  -> Not found on previous page. Scanning page {page}...")
+            time.sleep(1) # ページ遷移前に1秒待機（Bot検知回避）
+            
+        try:
+            versions = apkmirror.get_versions(page_url)
+        except Exception as e:
+            print(f"  -> Failed to fetch page {page}: {e}")
             break
             
+        for v in versions:
+            if target_version in v.version:
+                target_v = v
+                break # 見つかったら内側のループを抜ける
+                
+        if target_v:
+            break # 見つかったら外側のページループも抜ける
+
     if not target_v:
-        print(f"  -> [WARNING] Version {target_version} not found on APKMirror.")
+        print(f"  -> [WARNING] Version {target_version} not found on APKMirror after checking 5 pages.")
         return None, None
 
-    # Bot判定回避のため1秒待機
+    print(f"  -> [SUCCESS] Target version found on APKMirror: {target_v.version}")
     time.sleep(1)
     
     try:
