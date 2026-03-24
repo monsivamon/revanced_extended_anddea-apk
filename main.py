@@ -14,12 +14,16 @@ from download_bins import download_apkeditor, download_morphe_cli
 # require_mpp=True の場合、.mpp ファイルが含まれていない過去の旧形式リリースを無視する
 def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
     print(f"  -> Fetching release history for {repo}...")
-    cmd = ["gh", "api", f"repos/{repo}/releases", "-F", "per_page=30"]
+    
+    # -F オプションを使うとPOSTリクエストになって弾かれるため、URLに直接クエリパラメータを含める
+    cmd = ["gh", "api", f"repos/{repo}/releases?per_page=30"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         releases = json.loads(result.stdout)
     except Exception as e:
         print(f"  -> [WARNING] Failed to fetch releases for {repo}: {e}")
+        if isinstance(e, subprocess.CalledProcessError):
+            print(f"  -> [DEBUG] Error Output: {e.stderr}")
         return {"stable": None, "pre": None}
         
     stable = None
@@ -235,7 +239,7 @@ def process(tag: str, is_pre: bool):
             else:
                 yt_input = "youtube_base.apk"
 
-    # ここがポイント！YouTubeとYT Musicの間に15秒のクールダウンを挟む
+    # [ANTI-BOT対策] YouTubeとYT Musicの間に15秒のクールダウンを挟む
     if yt_variant and ytm_variant:
         print("\n[ANTI-BOT] Waiting 15 seconds before fetching the next APK to bypass APKMirror rate limits...")
         time.sleep(15)
