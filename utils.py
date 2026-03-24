@@ -1,9 +1,10 @@
 import os
+import shutil
 import requests
 import subprocess
 import sys
 
-# Cloudscraperのインスタンスを保持する変数（必要な時だけ読み込む設計）
+# Cloudscraperのインスタンスを保持する変数
 _scraper = None
 
 # CloudflareなどのBotアクセス制限を突破してダウンロードするためのスクレイパーを取得する
@@ -24,21 +25,40 @@ def panic(message: str):
     exit(1)
 
 
-# 指定したURLからファイルをダウンロードしてローカルに保存する
-def download(link: str, out: str, headers=None, use_scraper=False):
+# 指定したURLからファイルをダウンロードしてローカルに保存する。
+# 🚀 403 Forbidden 対策: 最終兵器「curl_cffi」を投入し、Chromeブラウザに完全偽装する
+def download(link: str, out: str, headers=None, use_scraper=True):
     if os.path.exists(out):
         print(f"{out} already exists skipping download")
         return
 
-    if use_scraper:
-        r = get_scraper().get(link, stream=True, headers=headers)
-    else:
-        r = requests.get(link, stream=True, headers=headers)
+    print(f"  -> [DEBUG] Downloading with curl_cffi (Ultimate Chrome Impersonation)...")
     
-    r.raise_for_status()
+    if headers is None:
+        headers = {}
+    
+    # 403対策: アリバイ工作（サイト内からの遷移だと偽装）
+    if "Referer" not in headers:
+        headers["Referer"] = "https://www.apkmirror.com/"
+
+    try:
+        # cloudscraperではなく、curl_cffi を局所的に呼び出して通信を偽装する
+        from curl_cffi import requests as cffi_requests
+        
+        # impersonate="chrome" で最新Chromeの暗号化方式を完全再現し、Cloudflareを突破
+        r = cffi_requests.get(link, stream=True, headers=headers, impersonate="chrome")
+        r.raise_for_status()
+        
+    except Exception as e:
+        status = getattr(r, 'status_code', 'Unknown') if 'r' in locals() else 'Unknown'
+        print(f"\n  -> [FATAL ERROR] Download blocked by server! (Status: {status})")
+        print(f"  -> Target URL: {link}")
+        panic(f"Error details: {e}")
+        
     with open(out, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
+            if chunk:
+                f.write(chunk)
 
 
 # コマンドライン実行のラッパー（エラーが発生した場合はログを出して強制終了）
@@ -53,14 +73,14 @@ def run_command(command: list[str]):
         exit(1)
 
 
-# APKEditorを使用して、分割APK（.apkm）を1つのAPK（.apk）に結合する
+# 【修正箇所②】マージ時のXML破損防止オプションを追加
 def merge_apk(path: str):
     subprocess.run(
-        ["java", "-jar", "./bins/apkeditor.jar", "m", "-i", path]
+        ["java", "-jar", "./bins/apkeditor.jar", "m", "-extractNativeLibs", "true", "-i", path]
     ).check_returncode()
 
 
-# Morphe CLIを使用して、指定したAPKにパッチ（.mpp）を適用する
+# 【修正箇所③】Morphe CLIの出力バグ回避 ＋ 強行突破の盾
 def patch_apk(
     cli: str,
     patches: str,
@@ -77,26 +97,23 @@ def patch_apk(
         "-jar",
         cli,
         "patch",
+        "-p",
+        patches,
+        # 🚀 強行突破の盾（一部のパッチがコケてもビルドを完走させる）
+        "--continue-on-error",
+        "--keystore", "ks.keystore",
+        "--keystore-entry-password", "123456789",
+        "--keystore-password", "123456789",
+        # 🚀 署名エラー防止
+        "--signer", "jhc",
+        "--keystore-entry-alias", "jhc",
     ]
-
-    command += ["-p", patches]
 
     for i in includes:
         command += ["-e", i]
 
     for e in excludes:
         command += ["-d", e]
-
-    # ダミーの署名（キーストア）情報を付与
-    command += [
-        "--keystore", "ks.keystore",
-        "--keystore-entry-password", "123456789",
-        "--keystore-password", "123456789",
-        "--keystore-entry-alias", "jhc",
-    ]
-
-    if out is not None:
-        command += ["--out", out]
 
     command.append(apk)
 
@@ -116,9 +133,15 @@ def patch_apk(
         print("------------------------", file=sys.stderr)
         result.check_returncode() 
 
+    # 🚀 CLIの --out 引数を使わず、出力後にPython側で安全にリネームする（出力バグ回避）
+    if out is not None:
+        cli_output = f"{str(apk).removesuffix('.apk')}-patched.apk"
+        if os.path.exists(out):
+            os.unlink(out)
+        shutil.move(cli_output, out)
+
 
 # GitHubに完成したAPKをリリース（アップロード）する
-# 既に同じバージョンのリリースが存在する場合は、一旦削除してから再作成する
 def publish_release(tag: str, files: list[str], message: str, title = ""):
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:
@@ -153,7 +176,6 @@ def publish_release(tag: str, files: list[str], message: str, title = ""):
         ]
 
         subprocess.run(api_cmd, env=os.environ.copy()).check_returncode()
-
         print("Old release & tag removed. Recreating fresh release...")
 
     # 新規リリースの作成とファイルのアップロード
