@@ -11,11 +11,9 @@ from utils import panic, patch_apk, merge_apk
 from download_bins import download_apkeditor, download_morphe_cli
 
 # GitHub API を使ってリポジトリの「最新Stable」と「最新Pre-release」を両方取得する
-# require_mpp=True の場合、.mpp ファイルが含まれていない過去の旧形式リリースを無視する
 def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
     print(f"  -> Fetching release history for {repo}...")
     
-    # -F オプションを使うとPOSTリクエストになって弾かれるため、URLに直接クエリパラメータを含める
     cmd = ["gh", "api", f"repos/{repo}/releases?per_page=30"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -32,7 +30,6 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         tag = r.get("tag_name")
         is_pre = r.get("prerelease", False)
         
-        # .mpp 拡張子のパッチファイルが含まれているかチェック (ReVanced時代の旧パッチを除外)
         if require_mpp:
             has_mpp = any(a.get("name", "").endswith(".mpp") for a in r.get("assets", []))
             if not has_mpp:
@@ -46,7 +43,6 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         
     return {"stable": stable, "pre": pre}
 
-# GitHub CLI を使ってリリースを作成（Pre-releaseフラグを自動制御）
 def publish_github_release(tag_name: str, files: list, message: str, title: str, is_prerelease: bool):
     release_type = "Pre-release" if is_prerelease else "Stable release"
     print(f"  -> Publishing {release_type}: {tag_name}...")
@@ -57,7 +53,6 @@ def publish_github_release(tag_name: str, files: list, message: str, title: str,
         
     subprocess.run(cmd, check=True)
 
-# JSON解析: 指定したタグのパッチ情報からターゲットバージョンとパッチリストを取得
 def get_target_versions_and_patches(tag: str) -> dict:
     url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/tags/{tag}/patches.json"
     print(f"  -> Fetching patches.json from {url}...")
@@ -74,21 +69,16 @@ def get_target_versions_and_patches(tag: str) -> dict:
     youtube_patches = []
     ytmusic_patches = []
 
-    # JSONがリストか辞書かを吸収する
     patches_list = data.get("patches", []) if isinstance(data, dict) else data
-
-    # 必須パッチ（無効化されていても強制的に適用する）
     mandatory_patches = ["Change package name", "GmsCore support", "MicroG support"]
 
     for patch in patches_list:
         patch_name = patch.get("name")
         compat = patch.get("compatiblePackages")
         
-        # 除外フラグ(excluded)や使用フラグ(use)がある場合の安全対策
         is_excluded = patch.get("excluded", False)
         is_use = patch.get("use", True)
         
-        # 安定性のため、デフォルトで除外されているパッチはスキップ（必須パッチは例外）
         if (is_excluded or not is_use) and patch_name not in mandatory_patches:
             continue
 
@@ -123,7 +113,6 @@ def get_target_versions_and_patches(tag: str) -> dict:
     }
 
 
-# APK取得: リスト画面を無視し、URLを予測して直接狙い撃つ
 def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> tuple[Version | None, Variant | None]:
     if not target_version: return None, None
         
@@ -169,7 +158,6 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
     return None, None
 
 
-# ビルド実行
 def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     patches = "bins/patches.mpp"
     cli = "bins/morphe-cli.jar"
@@ -188,7 +176,6 @@ def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     return output_apk
 
 
-# 古い作業ファイルを削除（連続ビルド時の干渉を防ぐ）
 def clean_workspace():
     files = ["youtube_base.apk", "youtube_base.apkm", "youtube_base_merged.apk",
              "ytmusic_base.apk", "ytmusic_base.apkm", "ytmusic_base_merged.apk", "bins/patches.mpp"]
@@ -199,7 +186,6 @@ def clean_workspace():
             os.remove(f)
 
 
-# 処理統合: 1つのタグに対するビルドパイプライン
 def process(tag: str, is_pre: bool):
     print(f"\n=======================================================")
     print(f"INITIATING BUILD PIPELINE FOR: {tag} ({'Pre-release' if is_pre else 'Stable'})")
@@ -231,29 +217,39 @@ def process(tag: str, is_pre: bool):
     yt_input = None
     if yt_variant:
         ext = ".apkm" if yt_variant.is_bundle else ".apk"
-        apkmirror.download_apk(yt_variant, path=f"youtube_base{ext}")
-        if os.path.exists(f"youtube_base{ext}"):
-            if yt_variant.is_bundle:
-                merge_apk("youtube_base.apkm")
-                yt_input = "youtube_base_merged.apk"
-            else:
-                yt_input = "youtube_base.apk"
+        # 🚀 ゾンビ化1: YouTubeのダウンロードをエラー回避ブロックで囲む
+        try:
+            apkmirror.download_apk(yt_variant, path=f"youtube_base{ext}")
+            if os.path.exists(f"youtube_base{ext}"):
+                if yt_variant.is_bundle:
+                    merge_apk("youtube_base.apkm")
+                    yt_input = "youtube_base_merged.apk"
+                else:
+                    yt_input = "youtube_base.apk"
+        except Exception as e:
+            print(f"  -> [WARNING] 🚨 YouTube base APK download failed: {e}")
+            print("  -> Continuing without YouTube...")
 
-    # [ANTI-BOT対策] YouTubeとYT Musicの間に15秒のクールダウンを挟む
-    if yt_variant and ytm_variant:
-        print("\n[ANTI-BOT] Waiting 15 seconds before fetching the next APK to bypass APKMirror rate limits...")
-        time.sleep(15)
+    # [ANTI-BOT対策] YouTubeをダウンロードした場合は45秒クールダウン
+    if yt_input and ytm_variant:
+        print("\n[ANTI-BOT] 🛡️ Waiting 45 seconds before fetching the next APK to bypass APKMirror Cloudflare...")
+        time.sleep(45)
 
     ytm_input = None
     if ytm_variant:
         ext = ".apkm" if ytm_variant.is_bundle else ".apk"
-        apkmirror.download_apk(ytm_variant, path=f"ytmusic_base{ext}")
-        if os.path.exists(f"ytmusic_base{ext}"):
-            if ytm_variant.is_bundle:
-                merge_apk("ytmusic_base.apkm")
-                ytm_input = "ytmusic_base_merged.apk"
-            else:
-                ytm_input = "ytmusic_base.apk"
+        # 🚀 ゾンビ化2: YT Musicのダウンロードをエラー回避ブロックで囲む
+        try:
+            apkmirror.download_apk(ytm_variant, path=f"ytmusic_base{ext}")
+            if os.path.exists(f"ytmusic_base{ext}"):
+                if ytm_variant.is_bundle:
+                    merge_apk("ytmusic_base.apkm")
+                    ytm_input = "ytmusic_base_merged.apk"
+                else:
+                    ytm_input = "ytmusic_base.apk"
+        except Exception as e:
+            print(f"  -> [WARNING] 🚨 YT Music base APK download failed: {e}")
+            print("  -> Continuing without YT Music...")
 
     print("\n[STEP 6] Preparing CLI...")
     download_morphe_cli()
@@ -266,20 +262,25 @@ def process(tag: str, is_pre: bool):
         outputs.append(build_target_apk("ytmusic", target_data["ytmusic"], ytm_input))
 
     if not outputs:
-        panic("  -> [ERROR] No APKs were built.")
+        panic("  -> [FATAL] Both APK downloads failed due to Cloudflare block. Cannot proceed.")
 
     print(f"\n[STEP 8] Publishing release to GitHub...")
-    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})\n\n### Included Apps:\n- YouTube v{yt_target_ver}\n- YouTube Music v{ytm_target_ver}"
+    
+    # 成功したアプリだけをリリースノートに記載する賢い仕組み
+    included_apps = []
+    if yt_input: included_apps.append(f"- YouTube v{yt_target_ver}")
+    if ytm_input: included_apps.append(f"- YouTube Music v{ytm_target_ver}")
+    apps_text = "\n".join(included_apps)
+    
+    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})\n\n### Included Apps:\n{apps_text}"
     publish_github_release(tag, outputs, message, f"RVX {tag}", is_pre)
     print("  -> [DONE] Release successfully published!")
 
 
-# バージョンの新旧比較ロジック
 def version_greater(v1: str | None, v2: str | None) -> bool:
     if not v1: return False
     if not v2: return True
     
-    print(f"  -> [DEBUG] Comparing: '{v1}' > '{v2}' ?")
     def normalize(v: str):
         v = v.lstrip('v')
         parts = v.split('-', 1)
@@ -304,29 +305,24 @@ def version_greater(v1: str | None, v2: str | None) -> bool:
 
     for i in range(3):
         if nums1[i] != nums2[i]:
-            result = nums1[i] > nums2[i]
-            print(f"  -> Numeric check: {nums1[i]} vs {nums2[i]} -> {result}")
-            return result
+            return nums1[i] > nums2[i]
 
     if not pre1 and pre2: return True
     if pre1 and not pre2: return False
 
     for p1, p2 in zip(pre1, pre2):
         if p1 != p2:
-            if type(p1) == type(p2): result = p1 > p2
-            else: result = str(p1) > str(p2)
-            print(f"  -> Prerelease check: {p1} vs {p2} -> {result}")
-            return result
+            if type(p1) == type(p2): return p1 > p2
+            else: return str(p1) > str(p2)
+            
     return len(pre1) > len(pre2)
 
 
-# メイン処理
 def main():
     repo_url = "monsivamon/revanced_extended_anddea-apk" 
     upstream_repo = "anddea/revanced-patches"
 
     print("\n[STEP 1] Fetching release history for upstream and my repo...")
-    # 上流(Anddea)は .mpp が含まれるリリースのみを抽出する（v3.16.0対策）
     upstream = get_latest_releases(upstream_repo, require_mpp=True)
     my_repo = get_latest_releases(repo_url, require_mpp=False)
     
