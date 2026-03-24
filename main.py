@@ -10,22 +10,31 @@ from apkmirror import Version, Variant
 from utils import panic, patch_apk, merge_apk 
 from download_bins import download_apkeditor, download_morphe_cli
 
-# GitHub CLI を使ってリポジトリの「最新Stable」と「最新Pre-release」を両方取得する
-def get_latest_releases(repo: str) -> dict:
+# GitHub API を使ってリポジトリの「最新Stable」と「最新Pre-release」を両方取得する
+# require_mpp=True の場合、.mpp ファイルが含まれていない過去の旧形式リリースを無視する
+def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
     print(f"  -> Fetching release history for {repo}...")
-    cmd = ["gh", "release", "list", "-R", repo, "--limit", "30", "--json", "tagName,isPrerelease"]
+    cmd = ["gh", "api", f"repos/{repo}/releases", "-F", "per_page=30"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         releases = json.loads(result.stdout)
     except Exception as e:
-        print(f"  -> [WARNING] Failed to fetch releases for {repo}. Might be empty.")
+        print(f"  -> [WARNING] Failed to fetch releases for {repo}: {e}")
         return {"stable": None, "pre": None}
         
     stable = None
     pre = None
     for r in releases:
-        tag = r["tagName"]
-        if r["isPrerelease"]:
+        tag = r.get("tag_name")
+        is_pre = r.get("prerelease", False)
+        
+        # .mpp 拡張子のパッチファイルが含まれているかチェック (ReVanced時代の旧パッチを除外)
+        if require_mpp:
+            has_mpp = any(a.get("name", "").endswith(".mpp") for a in r.get("assets", []))
+            if not has_mpp:
+                continue
+        
+        if is_pre:
             if not pre: pre = tag
         else:
             if not stable: stable = tag
@@ -141,7 +150,6 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
         print(f"  -> [WARNING] Could not snipe the URL for {target_version}.")
         return None, None
 
-    # Morphe版と同様、Bundle(apkm)も許容してマージする方針に変更（取得成功率大幅UP）
     for variant in variants:
         if variant.is_bundle:
             arch = variant.architecture.lower()
@@ -227,6 +235,11 @@ def process(tag: str, is_pre: bool):
             else:
                 yt_input = "youtube_base.apk"
 
+    # ここがポイント！YouTubeとYT Musicの間に15秒のクールダウンを挟む
+    if yt_variant and ytm_variant:
+        print("\n[ANTI-BOT] Waiting 15 seconds before fetching the next APK to bypass APKMirror rate limits...")
+        time.sleep(15)
+
     ytm_input = None
     if ytm_variant:
         ext = ".apkm" if ytm_variant.is_bundle else ".apk"
@@ -309,8 +322,9 @@ def main():
     upstream_repo = "anddea/revanced-patches"
 
     print("\n[STEP 1] Fetching release history for upstream and my repo...")
-    upstream = get_latest_releases(upstream_repo)
-    my_repo = get_latest_releases(repo_url)
+    # 上流(Anddea)は .mpp が含まれるリリースのみを抽出する（v3.16.0対策）
+    upstream = get_latest_releases(upstream_repo, require_mpp=True)
+    my_repo = get_latest_releases(repo_url, require_mpp=False)
     
     print("\n--- VERSION STATUS ---")
     print(f"Upstream Stable: {upstream['stable']}")
