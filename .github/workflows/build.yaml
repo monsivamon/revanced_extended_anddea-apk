@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [youtube, ytmusic]
     steps:
       - uses: actions/checkout@v4
       
@@ -28,4 +32,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p bins
-          python -u main.py
+          python -u main.py --app ${{ matrix.app }}

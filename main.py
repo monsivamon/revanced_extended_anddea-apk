@@ -4,24 +4,21 @@ import time
 import json
 import urllib.request
 import subprocess
+import argparse
 import apkmirror
 
 from apkmirror import Version, Variant
 from utils import panic, patch_apk, merge_apk 
 from download_bins import download_apkeditor, download_morphe_cli
 
-# GitHub API を使ってリポジトリの「最新Stable」と「最新Pre-release」を両方取得する
 def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
     print(f"  -> Fetching release history for {repo}...")
-    
     cmd = ["gh", "api", f"repos/{repo}/releases?per_page=30"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         releases = json.loads(result.stdout)
     except Exception as e:
         print(f"  -> [WARNING] Failed to fetch releases for {repo}: {e}")
-        if isinstance(e, subprocess.CalledProcessError):
-            print(f"  -> [DEBUG] Error Output: {e.stderr}")
         return {"stable": None, "pre": None}
         
     stable = None
@@ -32,8 +29,7 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         
         if require_mpp:
             has_mpp = any(a.get("name", "").endswith(".mpp") for a in r.get("assets", []))
-            if not has_mpp:
-                continue
+            if not has_mpp: continue
         
         if is_pre:
             if not pre: pre = tag
@@ -43,20 +39,33 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         
     return {"stable": stable, "pre": pre}
 
+# 🚀 衝突回避！「作成」と「追記アップロード」を自動判別するハイブリッド・リリース機能
 def publish_github_release(tag_name: str, files: list, message: str, title: str, is_prerelease: bool):
-    release_type = "Pre-release" if is_prerelease else "Stable release"
-    print(f"  -> Publishing {release_type}: {tag_name}...")
+    print(f"  -> Attempting to publish/upload to {tag_name}...")
     
-    cmd = ["gh", "release", "create", tag_name] + files + ["-t", title, "-n", message]
-    if is_prerelease:
-        cmd.append("--prerelease")
-        
-    subprocess.run(cmd, check=True)
+    # すでにリリース枠が存在するかチェック
+    check_cmd = ["gh", "release", "view", tag_name]
+    res = subprocess.run(check_cmd, capture_output=True)
+    
+    if res.returncode == 0:
+        # すでに相方(別サーバー)が枠を作っていたら、そこにファイルを「追記」する
+        print("  -> Release already exists! Uploading assets to the existing release...")
+        subprocess.run(["gh", "release", "upload", tag_name] + files + ["--clobber"], check=True)
+    else:
+        # まだ誰も作っていなければ、枠を作成してファイルを上げる
+        print("  -> Creating new release...")
+        cmd_create = ["gh", "release", "create", tag_name] + files + ["-t", title, "-n", message]
+        if is_prerelease: cmd_create.append("--prerelease")
+        try:
+            subprocess.run(cmd_create, check=True)
+        except subprocess.CalledProcessError:
+            # 作成中に一瞬の差で相方が作った場合のフェイルセーフ
+            print("  -> Create failed (likely race condition). Falling back to upload...")
+            subprocess.run(["gh", "release", "upload", tag_name] + files + ["--clobber"], check=True)
 
 def get_target_versions_and_patches(tag: str) -> dict:
     url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/tags/{tag}/patches.json"
     print(f"  -> Fetching patches.json from {url}...")
-    
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req) as response:
@@ -75,26 +84,20 @@ def get_target_versions_and_patches(tag: str) -> dict:
     for patch in patches_list:
         patch_name = patch.get("name")
         compat = patch.get("compatiblePackages")
-        
         is_excluded = patch.get("excluded", False)
         is_use = patch.get("use", True)
         
-        if (is_excluded or not is_use) and patch_name not in mandatory_patches:
-            continue
+        if (is_excluded or not is_use) and patch_name not in mandatory_patches: continue
 
         if isinstance(compat, dict):
             if "com.google.android.youtube" in compat:
                 youtube_patches.append(patch_name)
                 versions = compat["com.google.android.youtube"]
-                if isinstance(versions, list) and len(versions) > 0:
-                    youtube_version = versions[-1]
-            
+                if isinstance(versions, list) and len(versions) > 0: youtube_version = versions[-1]
             if "com.google.android.apps.youtube.music" in compat:
                 ytmusic_patches.append(patch_name)
                 versions = compat["com.google.android.apps.youtube.music"]
-                if isinstance(versions, list) and len(versions) > 0:
-                    ytmusic_version = versions[-1]
-
+                if isinstance(versions, list) and len(versions) > 0: ytmusic_version = versions[-1]
         elif isinstance(compat, list):
             for pkg in compat:
                 if isinstance(pkg, dict):
@@ -112,51 +115,33 @@ def get_target_versions_and_patches(tag: str) -> dict:
         "ytmusic": {"version": ytmusic_version, "patches": ytmusic_patches}
     }
 
-
 def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> tuple[Version | None, Variant | None]:
     if not target_version: return None, None
-        
-    print(f"  -> [SNIPER MODE] Predicting direct URL for {app_id} v{target_version}...")
     slug_version = target_version.replace('.', '-')
-    
-    urls_to_try = [
-        f"{base_url}{app_id}-{slug_version}-release/",
-        f"{base_url}{app_id}-{slug_version}/"
-    ]
+    urls_to_try = [f"{base_url}{app_id}-{slug_version}-release/", f"{base_url}{app_id}-{slug_version}/"]
     
     variants = []
     target_v = None
-    
     for url in urls_to_try:
-        print(f"  -> Trying direct link: {url}")
         target_v = Version(version=target_version, link=url)
         try:
             variants = apkmirror.get_variants(target_v)
-            if variants:
-                print("  -> [SUCCESS] Direct link hit! Found variants.")
-                break
-        except Exception as e:
+            if variants: break
+        except Exception:
             time.sleep(1)
             continue
 
-    if not variants:
-        print(f"  -> [WARNING] Could not snipe the URL for {target_version}.")
-        return None, None
+    if not variants: return None, None
 
     for variant in variants:
         if variant.is_bundle:
             arch = variant.architecture.lower()
-            if "universal" in arch or "arm64" in arch or "nodpi" in arch:
-                return target_v, variant
-                
+            if "universal" in arch or "arm64" in arch or "nodpi" in arch: return target_v, variant
     for variant in variants:
         if not variant.is_bundle:
             arch = variant.architecture.lower()
-            if "nodpi" in arch or "universal" in arch or "arm64" in arch:
-                return target_v, variant
-                
+            if "nodpi" in arch or "universal" in arch or "arm64" in arch: return target_v, variant
     return None, None
-
 
 def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     patches = "bins/patches.mpp"
@@ -166,113 +151,76 @@ def build_target_apk(target_name: str, target_data: dict, input_apk: str):
     
     output_apk = f"{target_name}-rvx-v{version}.apk"
     print(f"  -> Building {output_apk} (Force applying {len(all_patches)} patches!)...")
-
     patch_apk(cli, patches, input_apk, includes=all_patches, excludes=[], out=output_apk)
     
-    if not os.path.exists(output_apk):
-        panic(f"  -> [ERROR] Failed to build {output_apk}")
-        
+    if not os.path.exists(output_apk): panic(f"  -> [ERROR] Failed to build {output_apk}")
     print(f"  -> [SUCCESS] {output_apk} successfully built!")
     return output_apk
 
-
 def clean_workspace():
-    files = ["youtube_base.apk", "youtube_base.apkm", "youtube_base_merged.apk",
-             "ytmusic_base.apk", "ytmusic_base.apkm", "ytmusic_base_merged.apk", "bins/patches.mpp"]
-    for f in files:
+    for f in ["youtube_base.apk", "youtube_base.apkm", "youtube_base_merged.apk", "ytmusic_base.apk", "ytmusic_base.apkm", "ytmusic_base_merged.apk", "bins/patches.mpp"]:
         if os.path.exists(f): os.remove(f)
     for f in os.listdir("."):
-        if f.endswith(".apk") and "rvx-v" in f:
-            os.remove(f)
+        if f.endswith(".apk") and "rvx-v" in f: os.remove(f)
 
-
-def process(tag: str, is_pre: bool):
+# 🚀 引数 target_app で指定されたアプリのみを処理する
+def process(tag: str, is_pre: bool, target_app: str):
     print(f"\n=======================================================")
-    print(f"INITIATING BUILD PIPELINE FOR: {tag} ({'Pre-release' if is_pre else 'Stable'})")
+    print(f"🚀 INITIATING BUILD PIPELINE FOR: {tag} ({target_app.upper()})")
     print(f"=======================================================")
     
     clean_workspace()
 
-    print("\n[STEP 3] Downloading patches.mpp for the target version...")
+    print("\n[STEP 3] Downloading patches & CLI...")
     subprocess.run(["gh", "release", "download", tag, "-R", "anddea/revanced-patches", "-p", "*.mpp", "-O", "bins/patches.mpp"], check=True)
+    download_apkeditor()
+    download_morphe_cli()
 
-    print("\n[STEP 4] Fetching target APK versions & patches from JSON...")
     target_data = get_target_versions_and_patches(tag)
-    yt_target_ver = target_data["youtube"]["version"]
-    ytm_target_ver = target_data["ytmusic"]["version"]
-
     yt_url = "https://www.apkmirror.com/apk/google-inc/youtube/"
     ytm_url = "https://www.apkmirror.com/apk/google-inc/youtube-music/"
 
-    yt_v, yt_variant = get_target_apk_variant(yt_url, yt_target_ver, "youtube")
-    ytm_v, ytm_variant = get_target_apk_variant(ytm_url, ytm_target_ver, "youtube-music")
+    outputs = []
 
-    if not yt_variant and not ytm_variant:
-        print("  -> [EXIT] Could not find any valid APK variants on APKMirror.")
-        return
-
-    print("\n[STEP 5] Downloading tools and base APKs...")
-    download_apkeditor()
-
-    yt_input = None
-    if yt_variant:
-        ext = ".apkm" if yt_variant.is_bundle else ".apk"
-        # 🚀 ゾンビ化1: YouTubeのダウンロードをエラー回避ブロックで囲む
-        try:
-            apkmirror.download_apk(yt_variant, path=f"youtube_base{ext}")
-            if os.path.exists(f"youtube_base{ext}"):
+    # 🎯 指定が youtube または all の場合のみ実行
+    if target_app in ["youtube", "all"]:
+        print("\n[YOUTUBE] Fetching target and downloading base APK...")
+        yt_v, yt_variant = get_target_apk_variant(yt_url, target_data["youtube"]["version"], "youtube")
+        if yt_variant:
+            ext = ".apkm" if yt_variant.is_bundle else ".apk"
+            try:
+                apkmirror.download_apk(yt_variant, path=f"youtube_base{ext}")
                 if yt_variant.is_bundle:
                     merge_apk("youtube_base.apkm")
                     yt_input = "youtube_base_merged.apk"
                 else:
                     yt_input = "youtube_base.apk"
-        except Exception as e:
-            print(f"  -> [WARNING] 🚨 YouTube base APK download failed: {e}")
-            print("  -> Continuing without YouTube...")
+                outputs.append(build_target_apk("youtube", target_data["youtube"], yt_input))
+            except Exception as e:
+                print(f"  -> [WARNING] 🚨 YouTube build failed: {e}")
 
-    # [ANTI-BOT対策] YouTubeをダウンロードした場合は45秒クールダウン
-    if yt_input and ytm_variant:
-        print("\n[ANTI-BOT] 🛡️ Waiting 45 seconds before fetching the next APK to bypass APKMirror Cloudflare...")
-        time.sleep(45)
-
-    ytm_input = None
-    if ytm_variant:
-        ext = ".apkm" if ytm_variant.is_bundle else ".apk"
-        # 🚀 ゾンビ化2: YT Musicのダウンロードをエラー回避ブロックで囲む
-        try:
-            apkmirror.download_apk(ytm_variant, path=f"ytmusic_base{ext}")
-            if os.path.exists(f"ytmusic_base{ext}"):
+    # 🎯 指定が ytmusic または all の場合のみ実行
+    if target_app in ["ytmusic", "all"]:
+        print("\n[YT MUSIC] Fetching target and downloading base APK...")
+        ytm_v, ytm_variant = get_target_apk_variant(ytm_url, target_data["ytmusic"]["version"], "youtube-music")
+        if ytm_variant:
+            ext = ".apkm" if ytm_variant.is_bundle else ".apk"
+            try:
+                apkmirror.download_apk(ytm_variant, path=f"ytmusic_base{ext}")
                 if ytm_variant.is_bundle:
                     merge_apk("ytmusic_base.apkm")
                     ytm_input = "ytmusic_base_merged.apk"
                 else:
                     ytm_input = "ytmusic_base.apk"
-        except Exception as e:
-            print(f"  -> [WARNING] 🚨 YT Music base APK download failed: {e}")
-            print("  -> Continuing without YT Music...")
-
-    print("\n[STEP 6] Preparing CLI...")
-    download_morphe_cli()
-
-    print(f"\n[STEP 7] Building patched APKs...")
-    outputs = []
-    if yt_input and os.path.exists(yt_input):
-        outputs.append(build_target_apk("youtube", target_data["youtube"], yt_input))
-    if ytm_input and os.path.exists(ytm_input):
-        outputs.append(build_target_apk("ytmusic", target_data["ytmusic"], ytm_input))
+                outputs.append(build_target_apk("ytmusic", target_data["ytmusic"], ytm_input))
+            except Exception as e:
+                print(f"  -> [WARNING] 🚨 YT Music build failed: {e}")
 
     if not outputs:
-        panic("  -> [FATAL] Both APK downloads failed due to Cloudflare block. Cannot proceed.")
+        panic("  -> [FATAL] No APKs were built. Aborting release.")
 
     print(f"\n[STEP 8] Publishing release to GitHub...")
-    
-    # 成功したアプリだけをリリースノートに記載する賢い仕組み
-    included_apps = []
-    if yt_input: included_apps.append(f"- YouTube v{yt_target_ver}")
-    if ytm_input: included_apps.append(f"- YouTube Music v{ytm_target_ver}")
-    apps_text = "\n".join(included_apps)
-    
-    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})\n\n### Included Apps:\n{apps_text}"
+    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})\n*(Apps are uploaded individually via matrix build)*"
     publish_github_release(tag, outputs, message, f"RVX {tag}", is_pre)
     print("  -> [DONE] Release successfully published!")
 
@@ -280,59 +228,42 @@ def process(tag: str, is_pre: bool):
 def version_greater(v1: str | None, v2: str | None) -> bool:
     if not v1: return False
     if not v2: return True
-    
     def normalize(v: str):
         v = v.lstrip('v')
         parts = v.split('-', 1)
         main_part = parts[0]
         prerelease_part = parts[1] if len(parts) > 1 else ""
-
-        main_nums = re.findall(r'\d+', main_part)
-        main_nums = [int(n) for n in main_nums[:3]]
+        main_nums = [int(n) for n in re.findall(r'\d+', main_part)[:3]]
         while len(main_nums) < 3: main_nums.append(0)
-
-        pre_parts = []
-        if prerelease_part:
-            for part in re.split(r'(\d+)', prerelease_part):
-                if part == '': continue
-                if part.isdigit(): pre_parts.append(int(part))
-                else: pre_parts.append(part)
-
+        pre_parts = [int(p) if p.isdigit() else p for p in re.split(r'(\d+)', prerelease_part) if p]
         return main_nums, pre_parts
 
     nums1, pre1 = normalize(v1)
     nums2, pre2 = normalize(v2)
 
     for i in range(3):
-        if nums1[i] != nums2[i]:
-            return nums1[i] > nums2[i]
+        if nums1[i] != nums2[i]: return nums1[i] > nums2[i]
 
     if not pre1 and pre2: return True
     if pre1 and not pre2: return False
-
     for p1, p2 in zip(pre1, pre2):
         if p1 != p2:
-            if type(p1) == type(p2): return p1 > p2
-            else: return str(p1) > str(p2)
-            
+            return p1 > p2 if type(p1) == type(p2) else str(p1) > str(p2)
     return len(pre1) > len(pre2)
 
-
 def main():
+    # 🚀 引数パーサーを追加
+    parser = argparse.ArgumentParser(description="RVX Auto Builder")
+    parser.add_argument("--app", choices=["youtube", "ytmusic", "all"], default="all", help="Which app to build")
+    args = parser.parse_args()
+
     repo_url = "monsivamon/revanced_extended_anddea-apk" 
     upstream_repo = "anddea/revanced-patches"
 
-    print("\n[STEP 1] Fetching release history for upstream and my repo...")
+    print(f"\n[STEP 1] Fetching release history... (Mode: {args.app.upper()})")
     upstream = get_latest_releases(upstream_repo, require_mpp=True)
     my_repo = get_latest_releases(repo_url, require_mpp=False)
     
-    print("\n--- VERSION STATUS ---")
-    print(f"Upstream Stable: {upstream['stable']}")
-    print(f"Upstream Pre   : {upstream['pre']}")
-    print(f"My Repo  Stable: {my_repo['stable']}")
-    print(f"My Repo  Pre   : {my_repo['pre']}")
-    print("----------------------\n")
-
     print("[STEP 2] Verifying build history for updates...")
     build_targets = []
     
@@ -346,11 +277,8 @@ def main():
         print("  -> [EXIT] No new updates found. Skipping build.")
         return
 
-    print(f"  -> [RESULT] Found {len(build_targets)} pending update(s)!")
-    
     for target in build_targets:
-        process(target["tag"], target["is_pre"])
-
+        process(target["tag"], target["is_pre"], args.app)
 
 if __name__ == "__main__":
     main()
