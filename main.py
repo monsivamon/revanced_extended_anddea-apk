@@ -115,7 +115,7 @@ def publish_github_release(tag_name: str, files: list, message: str, title: str,
 
 # Anddeaリポジトリから指定タグの patches.json を取得してパースする
 def fetch_patches_json(tag: str) -> list:
-    url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/tags/{tag}/patches.json"
+    url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/main/patches.json"
     print(f"  -> Fetching patches.json from {url}...")
     try:
         req = urllib.request.Request(url)
