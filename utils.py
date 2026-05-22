@@ -3,10 +3,11 @@ import shutil
 import requests
 import subprocess
 import sys
+import glob
 
 _scraper = None
 
-# CloudflareのBot対策を回避するためのスクレイパーを返す
+# Cloudflare等のBot判定を回避するためのブラウザ偽装スクレイパーを取得する
 def get_scraper():
     global _scraper
     if _scraper is None:
@@ -17,12 +18,12 @@ def get_scraper():
         })
     return _scraper
 
-# エラーメッセージを出力して強制終了
+# 致命的なエラーメッセージを表示し、スクリプトを強制終了する
 def panic(message: str):
     print(message, file=sys.stderr)
     exit(1)
 
-# 指定URLからファイルをダウンロード（curl_cffiでブラウザ偽装）
+# 指定されたURLからファイルをダウンロードする（curl_cffiでブラウザを偽装）
 def download(link: str, out: str, headers=None, use_scraper=True):
     if os.path.exists(out):
         print(f"{out} already exists skipping download")
@@ -50,7 +51,7 @@ def download(link: str, out: str, headers=None, use_scraper=True):
             if chunk:
                 f.write(chunk)
 
-# シェルコマンドを実行し、失敗時はエラー出力して終了
+# 外部シェルコマンドを実行し、失敗時はログを出力して異常終了する
 def run_command(command: list[str]):
     cmd = subprocess.run(command, capture_output=True, shell=True)
     try:
@@ -60,13 +61,13 @@ def run_command(command: list[str]):
         print(cmd.stderr)
         exit(1)
 
-# APKをマージ（ネイティブライブラリ抽出オプション付き）
+# APKEditorを使用して、分割されたAPK（APKM/APKS等）を単一のAPKにマージする
 def merge_apk(path: str):
     subprocess.run(
         ["java", "-jar", "./bins/apkeditor.jar", "m", "-extractNativeLibs", "true", "-i", path]
     ).check_returncode()
 
-# Morphe CLIでAPKにパッチを適用し、必要ならリネーム
+# Morphe CLIでパッチを適用・署名し、生成された成果物を指定パスへ移動する
 def patch_apk(
     cli: str,
     patches: str,
@@ -110,18 +111,22 @@ def patch_apk(
         result.check_returncode()
 
     if out is not None:
-        # 実際のMorphe CLI出力ファイルは「ベース名-Morphe-base.apk」
-        cli_output = f"{os.path.splitext(apk)[0]}-Morphe-base.apk"
+        base_name = os.path.splitext(apk)[0]
+        expected_target = f"{base_name}-Morphe-base.apk"
+        
+        found_files = glob.glob(f"**/{expected_target}", recursive=True)
 
-        if not os.path.exists(cli_output):
-            panic(f"Expected CLI output not found: {cli_output}")
+        if not found_files:
+            panic(f"Expected CLI output not found: {expected_target}")
+
+        cli_output = found_files[0]
 
         if os.path.exists(out):
             os.unlink(out)
 
         shutil.move(cli_output, out)
 
-# GitHub Releaseを作成し、ファイルをアップロード（既存の場合は削除して再作成）
+# GitHub CLIを使用してGitHubリポジトリにリリースを作成（既存リリースの削除と再作成を含む）
 def publish_release(tag: str, files: list[str], message: str, title=""):
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:
