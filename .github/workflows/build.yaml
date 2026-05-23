@@ -11,17 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [youtube, ytmusic]
     steps:
       - uses: actions/checkout@v4
       
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
           
       - name: Install dependencies
         run: |
@@ -30,6 +26,7 @@ jobs:
       - name: Run build pipeline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         run: |
           mkdir -p bins
-          python -u main.py --app ${{ matrix.app }}
+          python -u main.py --app all

@@ -9,7 +9,11 @@ import argparse
 import apkmirror
 from functools import cmp_to_key
 
-# 外部ライブラリによる sys.exit() 等のプロセス強制終了を例外に変換して捕捉可能にする
+from apkmirror import Version, Variant
+from utils import patch_apk, merge_apk 
+from download_bins import download_apkeditor, download_morphe_cli
+
+# 外部ライブラリによるプロセス強制終了を例外に変換して安全に捕捉可能にする
 class ProcessExitException(BaseException): pass
 def prevent_exit(code=0):
     raise ProcessExitException(f"Process exit prevented! (exit code {code})")
@@ -17,16 +21,12 @@ def prevent_exit(code=0):
 sys.exit = prevent_exit
 os._exit = prevent_exit
 
-from apkmirror import Version, Variant
-from utils import patch_apk, merge_apk 
-from download_bins import download_apkeditor, download_morphe_cli
-
-# 外部ライブラリの panic を上書きし、安全に例外として処理する
+# 致命的なエラーメッセージを標準エラー出力に流して安全に処理を終了する
 def panic(msg):
-    print(f"  -> [FATAL] {msg}")
+    print(f"  -> [FATAL] {msg}", file=sys.stderr)
     raise ProcessExitException(msg)
 
-# プレリリースを含むバージョン文字列を数値的に比較し、v1 が v2 より新しければ True を返す
+# プレリリースを含むバージョン文字列を数値的に比較し、v1がv2より新しければTrueを返す
 def version_greater(v1: str | None, v2: str | None) -> bool:
     if not v1: return False
     if not v2: return True
@@ -94,7 +94,7 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         "pre": valid_pre[0] if valid_pre else None
     }
 
-# GitHubリリースを作成または既存のリリースにアセットを追記する（並列実行時の競合回避）
+# GitHubリリースを作成または既存のリリースにアセットを追記する
 def publish_github_release(tag_name: str, files: list, message: str, title: str, is_prerelease: bool):
     print(f"  -> Attempting to publish/upload to {tag_name}...")
     check_cmd = ["gh", "release", "view", tag_name]
@@ -113,9 +113,10 @@ def publish_github_release(tag_name: str, files: list, message: str, title: str,
             print("  -> Create failed (likely race condition). Falling back to upload...")
             subprocess.run(["gh", "release", "upload", tag_name] + files + ["--clobber"], check=True)
 
-# Anddeaリポジトリからpatches.json を取得してパースする
-def fetch_patches_json(tag: str) -> list:
-    url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/main/patches-list.json"
+# 安定版かプレリリース版かに応じて、mainまたはdevブランチから正確にpatches-list.jsonを取得・パースする
+def fetch_patches_json(is_pre: bool) -> list:
+    branch = "dev" if is_pre else "main"
+    url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/{branch}/patches-list.json"
     print(f"  -> Fetching patches.json from {url}...")
     try:
         req = urllib.request.Request(url)
@@ -123,7 +124,7 @@ def fetch_patches_json(tag: str) -> list:
             data = json.loads(response.read().decode('utf-8'))
             return data.get("patches", []) if isinstance(data, dict) else data
     except Exception as e:
-        panic(f"Failed to load patches.json: {e}")
+        panic(f"Failed to load patches.json from {branch} branch: {e}")
 
 # 対象アプリがサポートするAPKバージョンのリストを抽出し、直近5件を古い順にソートして返す
 def get_supported_versions(patches_list: list, package_name: str) -> list:
@@ -181,7 +182,7 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
         try:
             variants = apkmirror.get_variants(target_v)
             if variants: break
-        except BaseException:
+        except Exception:
             time.sleep(1)
             continue
 
@@ -241,8 +242,8 @@ def download_with_fallback(app_id: str, base_url: str, supported_versions: list)
                     return f"{filename}_merged.apk", version
                 else:
                     return filepath, version
-        except BaseException as e:
-            print(f"  -> [BLOCKED] Download failed for v{version}. Intercepted fatal exit: {e}")
+        except Exception as e:
+            print(f"  -> [BLOCKED] Download failed for v{version}: {e}")
             if os.path.exists(filepath): os.remove(filepath)
             print("  -> Retrying with an older supported version...")
             time.sleep(3) 
@@ -263,7 +264,7 @@ def process(tag: str, is_pre: bool, target_app: str):
     download_apkeditor()
     download_morphe_cli()
 
-    patches_list = fetch_patches_json(tag)
+    patches_list = fetch_patches_json(is_pre)
     yt_url = "https://www.apkmirror.com/apk/google-inc/youtube/"
     ytm_url = "https://www.apkmirror.com/apk/google-inc/youtube-music/"
 
@@ -280,8 +281,8 @@ def process(tag: str, is_pre: bool, target_app: str):
                 yt_patches = get_patches_for_version(patches_list, "com.google.android.youtube", final_yt_ver)
                 out = build_target_apk("youtube", final_yt_ver, yt_patches, yt_input)
                 outputs.append(out)
-                included_apps_text.append(f"- YouTube v{final_yt_ver}")
-            except BaseException as e:
+                included_apps_text.append(f"YouTube v{final_yt_ver}")
+            except Exception as e:
                 print(f"  -> [WARNING] YouTube build failed: {e}")
         else:
             print("  -> [FATAL] All fallback attempts failed for YouTube.")
@@ -296,8 +297,8 @@ def process(tag: str, is_pre: bool, target_app: str):
                 ytm_patches = get_patches_for_version(patches_list, "com.google.android.apps.youtube.music", final_ytm_ver)
                 out = build_target_apk("ytmusic", final_ytm_ver, ytm_patches, ytm_input)
                 outputs.append(out)
-                included_apps_text.append(f"- YouTube Music v{final_ytm_ver}")
-            except BaseException as e:
+                included_apps_text.append(f"YouTube Music v{final_ytm_ver}")
+            except Exception as e:
                 print(f"  -> [WARNING] YT Music build failed: {e}")
         else:
             print("  -> [FATAL] All fallback attempts failed for YT Music.")
@@ -307,7 +308,7 @@ def process(tag: str, is_pre: bool, target_app: str):
 
     print(f"\n[STEP 8] Publishing release to GitHub...")
     apps_str = "\n".join(included_apps_text)
-    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})"
+    message = f"Changelogs:\n[Anddea Patches {tag}](https://github.com/anddea/revanced-patches/releases/tag/{tag})\n\n### Included Apps:\n{apps_str}"
     
     publish_github_release(tag, outputs, message, f"RVX {tag}", is_pre)
     print("  -> [DONE] Release successfully published!")
@@ -349,7 +350,10 @@ def main():
         return
 
     for target in build_targets:
-        process(target["tag"], target["is_pre"], args.app)
+        try:
+            process(target["tag"], target["is_pre"], args.app)
+        except ProcessExitException:
+            pass
 
 if __name__ == "__main__":
     main()

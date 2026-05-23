@@ -3,11 +3,11 @@ import shutil
 import requests
 import subprocess
 import sys
+import glob
 
-# Cloudscraperのインスタンスを保持する変数
 _scraper = None
 
-# CloudflareなどのBotアクセス制限を突破してダウンロードするためのスクレイパーを取得する
+# Cloudflare等のBot判定を回避するためのブラウザ偽装スクレイパーを取得する
 def get_scraper():
     global _scraper
     if _scraper is None:
@@ -18,53 +18,42 @@ def get_scraper():
         })
     return _scraper
 
-
-# エラーメッセージを標準エラー出力に吐き出して、プログラムを強制終了させる
+# 致命的なエラーメッセージを表示し、スクリプトを強制終了する
 def panic(message: str):
     print(message, file=sys.stderr)
     exit(1)
 
-
-# 指定したURLからファイルをダウンロードしてローカルに保存する。
-# 🚀 403 Forbidden 対策: 最終兵器「curl_cffi」を投入し、Chromeブラウザに完全偽装する
+# 指定されたURLからファイルをダウンロードする（curl_cffiでブラウザを偽装）
 def download(link: str, out: str, headers=None, use_scraper=True):
     if os.path.exists(out):
         print(f"{out} already exists skipping download")
         return
 
-    print(f"  -> [DEBUG] Downloading with curl_cffi (Ultimate Chrome Impersonation)...")
-    
+    print("  -> [DEBUG] Downloading with curl_cffi...")
+
     if headers is None:
         headers = {}
-    
-    # 403対策: アリバイ工作（サイト内からの遷移だと偽装）
     if "Referer" not in headers:
         headers["Referer"] = "https://www.apkmirror.com/"
 
     try:
-        # cloudscraperではなく、curl_cffi を局所的に呼び出して通信を偽装する
         from curl_cffi import requests as cffi_requests
-        
-        # impersonate="chrome" で最新Chromeの暗号化方式を完全再現し、Cloudflareを突破
         r = cffi_requests.get(link, stream=True, headers=headers, impersonate="chrome")
         r.raise_for_status()
-        
     except Exception as e:
         status = getattr(r, 'status_code', 'Unknown') if 'r' in locals() else 'Unknown'
-        print(f"\n  -> [FATAL ERROR] Download blocked by server! (Status: {status})")
-        print(f"  -> Target URL: {link}")
+        print(f"\n  -> [FATAL ERROR] Download blocked (Status: {status})")
+        print(f"  -> Target: {link}")
         panic(f"Error details: {e}")
-        
+
     with open(out, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
 
-
-# コマンドライン実行のラッパー（エラーが発生した場合はログを出して強制終了）
+# 外部シェルコマンドを実行し、失敗時はログを出力して異常終了する
 def run_command(command: list[str]):
     cmd = subprocess.run(command, capture_output=True, shell=True)
-
     try:
         cmd.check_returncode()
     except subprocess.CalledProcessError:
@@ -72,15 +61,13 @@ def run_command(command: list[str]):
         print(cmd.stderr)
         exit(1)
 
-
-# 【修正箇所②】マージ時のXML破損防止オプションを追加
+# APKEditorを使用して、分割されたAPK（APKM/APKS等）を単一のAPKにマージする
 def merge_apk(path: str):
     subprocess.run(
         ["java", "-jar", "./bins/apkeditor.jar", "m", "-extractNativeLibs", "true", "-i", path]
     ).check_returncode()
 
-
-# 【修正箇所③】Morphe CLIの出力バグ回避 ＋ 強行突破の盾
+# Morphe CLIでパッチを適用・署名し、生成された成果物を指定パスへ移動する
 def patch_apk(
     cli: str,
     patches: str,
@@ -93,60 +80,62 @@ def patch_apk(
     excludes = excludes or []
 
     command = [
-        "java",
-        "-jar",
-        cli,
-        "patch",
-        "-p",
-        patches,
-        # 🚀 強行突破の盾（一部のパッチがコケてもビルドを完走させる）
+        "java", "-jar", cli, "patch",
+        "-p", patches,
         "--continue-on-error",
         "--keystore", "ks.keystore",
         "--keystore-entry-password", "123456789",
         "--keystore-password", "123456789",
-        # 🚀 署名エラー防止
         "--signer", "jhc",
         "--keystore-entry-alias", "jhc",
     ]
 
     for i in includes:
         command += ["-e", i]
-
     for e in excludes:
         command += ["-d", e]
 
     command.append(apk)
 
     print(f"Executing: {' '.join(command)}")
-
     result = subprocess.run(command, capture_output=True, text=True)
-    
-    # 成功時もMorpheのパッチ進行ログを表示
+
     if result.stdout:
         print(result.stdout)
-    
-    # エラー時は詳細なログを出力して停止
+
     if result.returncode != 0:
         print("--- CLI Error Output ---", file=sys.stderr)
         print(result.stdout, file=sys.stderr)
-        print(result.stderr, file=sys.stderr) 
+        print(result.stderr, file=sys.stderr)
         print("------------------------", file=sys.stderr)
-        result.check_returncode() 
+        result.check_returncode()
 
-    # 🚀 CLIの --out 引数を使わず、出力後にPython側で安全にリネームする（出力バグ回避）
     if out is not None:
-        cli_output = f"{str(apk).removesuffix('.apk')}-patched.apk"
+        base_name = os.path.splitext(apk)[0]
+        
+        # 大文字小文字の区別を無視して、生成された成果物を再帰的に検索する
+        all_apks = glob.glob("**/*.apk", recursive=True)
+        found_files = [
+            f for f in all_apks 
+            if base_name in os.path.basename(f) and "morphe" in os.path.basename(f).lower()
+        ]
+
+        if not found_files:
+            panic(f"Expected CLI output not found for: {base_name}")
+
+        cli_output = found_files[0]
+        print(f"  -> [DEBUG] Detected generated APK: {cli_output}")
+
         if os.path.exists(out):
             os.unlink(out)
+
         shutil.move(cli_output, out)
 
-
-# GitHubに完成したAPKをリリース（アップロード）する
-def publish_release(tag: str, files: list[str], message: str, title = ""):
+# GitHub CLIを使用してGitHubリポジトリにリリースを作成（既存リリースの削除と再作成を含む）
+def publish_release(tag: str, files: list[str], message: str, title=""):
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:
         raise Exception("GITHUB_TOKEN is not set")
-
     if len(files) == 0:
         raise Exception("Files should have at least one item")
 
@@ -159,27 +148,18 @@ def publish_release(tag: str, files: list[str], message: str, title = ""):
         return result.returncode == 0
 
     if release_exists(tag):
-        print(f"Release '{tag}' already exists — deleting old release...")
+        print(f"Release '{tag}' already exists — deleting...")
+        subprocess.run(["gh", "release", "delete", tag, "-y"],
+                       env=os.environ.copy()).check_returncode()
 
-        # リリース本体の削除
-        subprocess.run(
-            ["gh", "release", "delete", tag, "-y"],
-            env=os.environ.copy()
-        ).check_returncode()
-
-        # タグの削除 (GitHub API 経由)
-        print(f"Deleting tag '{tag}' via GitHub API...")
+        print(f"Deleting tag '{tag}' via API...")
         api_cmd = [
-            "gh", "api",
-            "--method", "DELETE",
+            "gh", "api", "--method", "DELETE",
             f"/repos/{os.environ['GITHUB_REPOSITORY']}/git/refs/tags/{tag}"
         ]
-
         subprocess.run(api_cmd, env=os.environ.copy()).check_returncode()
-        print("Old release & tag removed. Recreating fresh release...")
+        print("Old release removed. Creating new one...")
 
-    # 新規リリースの作成とファイルのアップロード
     command = ["gh", "release", "create", "--latest", tag, "--notes", message, "--title", title]
     command.extend(files)
-
     subprocess.run(command, env=os.environ.copy()).check_returncode()
