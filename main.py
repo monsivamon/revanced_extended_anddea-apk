@@ -113,61 +113,35 @@ def publish_github_release(tag_name: str, files: list, message: str, title: str,
             print("  -> Create failed (likely race condition). Falling back to upload...")
             subprocess.run(["gh", "release", "upload", tag_name] + files + ["--clobber"], check=True)
 
-# 安定版かプレリリース版かに応じて、mainまたはdevブランチから正確にpatches-list.jsonを取得・パースする
-def fetch_patches_json(is_pre: bool) -> list:
-    branch = "dev" if is_pre else "main"
-    url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/{branch}/patches-list.json"
-    print(f"  -> Fetching patches.json from {url}...")
+# 【新規追加】Constants.ktから正規表現でサポートバージョンを抽出し、直近5件を返す
+def fetch_supported_versions_from_kt(branch: str, app_type: str) -> list:
+    if app_type == "youtube":
+        url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/{branch}/patches/src/main/kotlin/app/morphe/patches/youtube/utils/compatibility/Constants.kt"
+    else:
+        url = f"https://raw.githubusercontent.com/anddea/revanced-patches/refs/heads/{branch}/patches/src/main/kotlin/app/morphe/patches/music/utils/compatibility/Constants.kt"
+        
+    print(f"  -> Fetching supported versions from {url}...")
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            return data.get("patches", []) if isinstance(data, dict) else data
+            content = response.read().decode('utf-8')
+            
+            # AppTarget(version = "19.05.36" ...) のフォーマットからバージョン番号を抽出
+            matches = re.findall(r'AppTarget\s*\(\s*version\s*=\s*"([^"]+)"', content)
+            
+            if not matches:
+                panic(f"No versions found in {url}")
+            
+            # 重複を排除してソート
+            versions_set = set(matches)
+            def parse_ver(v):
+                return [int(x) for x in re.findall(r'\d+', v)]
+            
+            sorted_versions = sorted(list(versions_set), key=parse_ver)
+            return sorted_versions[-5:] # 古い順に5件
+            
     except Exception as e:
-        panic(f"Failed to load patches.json from {branch} branch: {e}")
-
-# 対象アプリがサポートするAPKバージョンのリストを抽出し、直近5件を古い順にソートして返す
-def get_supported_versions(patches_list: list, package_name: str) -> list:
-    versions_set = set()
-    for patch in patches_list:
-        compat = patch.get("compatiblePackages")
-        if isinstance(compat, dict) and package_name in compat:
-            if compat[package_name]: versions_set.update(compat[package_name])
-        elif isinstance(compat, list):
-            for pkg in compat:
-                if isinstance(pkg, dict) and pkg.get("name") == package_name:
-                    if pkg.get("versions"): versions_set.update(pkg.get("versions"))
-
-    def parse_ver(v):
-        return [int(x) for x in re.findall(r'\d+', v)]
-    
-    sorted_versions = sorted(list(versions_set), key=parse_ver)
-    return sorted_versions[-5:]
-
-# 指定されたAPKバージョンと互換性のあるすべてのパッチをフラグを無視して抽出する
-def get_patches_for_version(patches_list: list, package_name: str, target_version: str) -> list:
-    patches = []
-    for patch in patches_list:
-        patch_name = patch.get("name")
-        compat = patch.get("compatiblePackages")
-
-        supports_version = False
-        if not compat: 
-            supports_version = True
-        elif isinstance(compat, dict) and package_name in compat:
-            versions = compat[package_name]
-            if not versions or target_version in versions: supports_version = True
-        elif isinstance(compat, list):
-            for pkg in compat:
-                if isinstance(pkg, dict) and pkg.get("name") == package_name:
-                    versions = pkg.get("versions", [])
-                    if not versions or target_version in versions: supports_version = True
-                    break
-
-        if supports_version:
-            patches.append(patch_name)
-
-    return patches
+        panic(f"Failed to fetch or parse Kotlin Constants for {app_type}: {e}")
 
 # APKMirrorをスクレイピングし、指定バージョンのダウンロード可能なVariantを取得する
 def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> tuple[Version | None, Variant | None]:
@@ -198,14 +172,16 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
             if "nodpi" in arch or "universal" in arch or "arm64" in arch: return target_v, variant
     return None, None
 
-# Morphe CLI を使用してベースAPKにパッチを適用し、最終的なAPKをビルドする
-def build_target_apk(target_name: str, version: str, patches_to_apply: list, input_apk: str):
+# Morphe CLI を使用してベースAPKにパッチを適用（デフォルトパッチを使用）
+def build_target_apk(target_name: str, version: str, input_apk: str):
     patches = "bins/patches.mpp"
     cli = "bins/morphe-cli.jar"
     
     output_apk = f"{target_name}-rvx-v{version}.apk"
-    print(f"  -> Building {output_apk} (Force applying ALL {len(patches_to_apply)} compatible patches)...")
-    patch_apk(cli, patches, input_apk, includes=patches_to_apply, excludes=[], out=output_apk)
+    print(f"  -> Building {output_apk} (Applying DEFAULT patches)...")
+    
+    # includesを指定しないことでCLIのデフォルト推奨パッチが適用される
+    patch_apk(cli, patches, input_apk, includes=[], excludes=[], out=output_apk)
     
     if not os.path.exists(output_apk): panic(f"Failed to build {output_apk}")
     print(f"  -> [SUCCESS] {output_apk} successfully built!")
@@ -264,7 +240,9 @@ def process(tag: str, is_pre: bool, target_app: str):
     download_apkeditor()
     download_morphe_cli()
 
-    patches_list = fetch_patches_json(is_pre)
+    # 安定版かプレリリースかで取得するブランチを切り替え（必要に応じて）
+    branch = "dev" if is_pre else "main"
+
     yt_url = "https://www.apkmirror.com/apk/google-inc/youtube/"
     ytm_url = "https://www.apkmirror.com/apk/google-inc/youtube-music/"
 
@@ -273,13 +251,13 @@ def process(tag: str, is_pre: bool, target_app: str):
 
     if target_app in ["youtube", "all"]:
         print("\n[YOUTUBE] Fetching target versions...")
-        yt_versions = get_supported_versions(patches_list, "com.google.android.youtube")
+        yt_versions = fetch_supported_versions_from_kt(branch, "youtube")
+        print(f"  -> Discovered versions: {yt_versions}")
         
         yt_input, final_yt_ver = download_with_fallback("youtube", yt_url, yt_versions)
         if yt_input and final_yt_ver:
             try:
-                yt_patches = get_patches_for_version(patches_list, "com.google.android.youtube", final_yt_ver)
-                out = build_target_apk("youtube", final_yt_ver, yt_patches, yt_input)
+                out = build_target_apk("youtube", final_yt_ver, yt_input)
                 outputs.append(out)
                 included_apps_text.append(f"YouTube v{final_yt_ver}")
             except Exception as e:
@@ -289,13 +267,13 @@ def process(tag: str, is_pre: bool, target_app: str):
 
     if target_app in ["ytmusic", "all"]:
         print("\n[YT MUSIC] Fetching target versions...")
-        ytm_versions = get_supported_versions(patches_list, "com.google.android.apps.youtube.music")
+        ytm_versions = fetch_supported_versions_from_kt(branch, "ytmusic")
+        print(f"  -> Discovered versions: {ytm_versions}")
         
         ytm_input, final_ytm_ver = download_with_fallback("youtube-music", ytm_url, ytm_versions)
         if ytm_input and final_ytm_ver:
             try:
-                ytm_patches = get_patches_for_version(patches_list, "com.google.android.apps.youtube.music", final_ytm_ver)
-                out = build_target_apk("ytmusic", final_ytm_ver, ytm_patches, ytm_input)
+                out = build_target_apk("ytmusic", final_ytm_ver, ytm_input)
                 outputs.append(out)
                 included_apps_text.append(f"YouTube Music v{final_ytm_ver}")
             except Exception as e:
