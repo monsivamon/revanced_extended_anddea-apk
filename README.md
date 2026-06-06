@@ -7,7 +7,7 @@ Automated build system for applying [Anddea's RVX](https://github.com/anddea/rev
 The core mechanism of this builder is based on [monsivamon/twitter-apk](https://github.com/monsivamon/twitter-apk).
 
 ## ⚠️ Disclaimer
-**App stability is NOT guaranteed.** This build system is configured to automatically parse the upstream JSON and apply the **recommended patches**, but unexpected bugs or crashes may still occur. Use at your own risk.
+**App stability is NOT guaranteed.** This build system is configured to dynamically extract patch metadata directly from the Morphe CLI and forcefully apply **all compatible patches**, but unexpected bugs or crashes may still occur. Use at your own risk.
 
 **Note on Missing APKs:** Due to APKMirror's download restrictions, one of the apps might occasionally fail to download during the build process. If a release only contains either YouTube or YouTube Music, don't worry—this is completely normal! The system is designed to automatically publish whichever app successfully builds.
 
@@ -23,8 +23,8 @@ To bypass download restrictions, YouTube and YouTube Music are built simultaneou
 ### 2. Dual-Track Release System (Stable & Pre-release)
 The builder independently monitors the upstream repository for both **Stable** and **Pre-release** updates, automatically triggering builds and appropriately tagging them so you always have access to the latest channels.
 
-### 3. Powered by Morphe CLI & Daily Automation
-The pipeline relies entirely on the modern **Morphe CLI** for fast and reliable patching, running automatically every day via GitHub Actions.
+### 3. Dynamic Patch Extraction via Morphe CLI
+Instead of relying on fragile upstream JSON files, this pipeline parses patch metadata (including version compatibility) dynamically directly from the **Morphe CLI** text output. This ensures the build process remains robust even if the upstream repository structure changes, running automatically every day via GitHub Actions.
 
 ## 📥 Download
 
