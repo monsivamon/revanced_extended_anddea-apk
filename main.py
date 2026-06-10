@@ -2,6 +2,8 @@ import sys
 import os
 import re
 import time
+import json
+import urllib.request
 import subprocess
 import argparse
 import apkmirror
@@ -235,7 +237,7 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
         try:
             variants = apkmirror.get_variants(target_v)
             if variants: break
-        except Exception:
+        except BaseException: 
             time.sleep(1)
             continue
 
@@ -300,7 +302,7 @@ def download_with_fallback(app_id: str, base_url: str, supported_versions: list)
                     return f"{filename}_merged.apk", version
                 else:
                     return filepath, version
-        except Exception as e:
+        except BaseException as e: 
             print(f"  -> [BLOCKED] Download failed for v{version}: {e}")
             if os.path.exists(filepath): os.remove(filepath)
             print("  -> Retrying with an older supported version...")
@@ -350,7 +352,7 @@ def process(tag: str, is_pre: bool, target_app: str):
                 out = build_target_apk("youtube", final_yt_ver, yt_patches, yt_input)
                 outputs.append(out)
                 included_apps_text.append(f"YouTube v{final_yt_ver}")
-            except Exception as e:
+            except BaseException as e: 
                 print(f"  -> [WARNING] YouTube build failed: {e}")
         else:
             print("  -> [FATAL] All fallback attempts failed for YouTube.")
@@ -368,7 +370,7 @@ def process(tag: str, is_pre: bool, target_app: str):
                 out = build_target_apk("ytmusic", final_ytm_ver, ytm_patches, ytm_input)
                 outputs.append(out)
                 included_apps_text.append(f"YouTube Music v{final_ytm_ver}")
-            except Exception as e:
+            except BaseException as e: 
                 print(f"  -> [WARNING] YT Music build failed: {e}")
         else:
             print("  -> [FATAL] All fallback attempts failed for YT Music.")
