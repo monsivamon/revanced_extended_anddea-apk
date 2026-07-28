@@ -7,7 +7,7 @@ import glob
 
 _scraper = None
 
-# Cloudflare等のBot判定を回避するためのブラウザ偽装スクレイパーを取得する
+# Get browser impersonating scraper to bypass Cloudflare/Bot detection
 def get_scraper():
     global _scraper
     if _scraper is None:
@@ -18,12 +18,12 @@ def get_scraper():
         })
     return _scraper
 
-# 致命的なエラーメッセージを表示し、スクリプトを強制終了する
+# Print fatal error message and exit the script
 def panic(message: str):
     print(message, file=sys.stderr)
     exit(1)
 
-# 指定されたURLからファイルをダウンロードする（curl_cffiでブラウザを偽装）
+# Download file from specified URL (impersonates browser via curl_cffi)
 def download(link: str, out: str, headers=None, use_scraper=True):
     if os.path.exists(out):
         print(f"{out} already exists skipping download")
@@ -51,7 +51,7 @@ def download(link: str, out: str, headers=None, use_scraper=True):
             if chunk:
                 f.write(chunk)
 
-# 外部シェルコマンドを実行し、失敗時はログを出力して異常終了する
+# Execute external shell command, output log on failure and exit abnormally
 def run_command(command: list[str]):
     cmd = subprocess.run(command, capture_output=True, shell=True)
     try:
@@ -61,13 +61,13 @@ def run_command(command: list[str]):
         print(cmd.stderr)
         exit(1)
 
-# APKEditorを使用して、分割されたAPK（APKM/APKS等）を単一のAPKにマージする
+# Merge split APKs (APKM/APKS etc.) into a single APK using APKEditor
 def merge_apk(path: str):
     subprocess.run(
         ["java", "-jar", "./bins/apkeditor.jar", "m", "-extractNativeLibs", "true", "-i", path]
     ).check_returncode()
 
-# Morphe CLIでパッチを適用・署名し、生成された成果物を指定パスへ移動する
+# Apply patches and sign using Morphe CLI, moving generated artifact to target path
 def patch_apk(
     cli: str,
     patches: str,
@@ -113,7 +113,7 @@ def patch_apk(
     if out is not None:
         base_name = os.path.splitext(apk)[0]
         
-        # 大文字小文字の区別を無視して、生成された成果物を再帰的に検索する
+        # Search recursively for generated output ignoring case sensitivity
         all_apks = glob.glob("**/*.apk", recursive=True)
         found_files = [
             f for f in all_apks 
@@ -131,7 +131,7 @@ def patch_apk(
 
         shutil.move(cli_output, out)
 
-# GitHub CLIを使用してGitHubリポジトリにリリースを作成（既存リリースの削除と再作成を含む）
+# Create GitHub release using GitHub CLI (including deletion and recreation of existing releases)
 def publish_release(tag: str, files: list[str], message: str, title=""):
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:

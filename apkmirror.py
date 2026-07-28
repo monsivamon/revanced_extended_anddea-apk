@@ -12,26 +12,26 @@ class Version:
 
 @dataclass
 class Variant:
-    is_bundle: bool  # APKがバンドル形式かどうか
-    link: str        # バリアントページへのリンク
-    architecture: str  # アーキテクチャ（例: arm64-v8a）
+    is_bundle: bool  # Whether the APK is in bundle format
+    link: str        # Link to the variant page
+    architecture: str  # Architecture (e.g., arm64-v8a)
 
 
-# HTML要素の検索に失敗した場合の例外
+# Exception raised when failing to find an HTML element
 class FailedToFindElement(Exception):
     def __init__(self, message=None) -> None:
         self.message = f"Failed to find element{' ' + message if message is not None else ''}"
         super().__init__(self.message)
 
 
-# HTTPリクエストの失敗例外
+# Exception raised when an HTTP request fails
 class FailedToFetch(Exception):
     def __init__(self, url=None) -> None:
         self.message = f"Failed to fetch{' ' + url if url is not None else ''}"
         super().__init__(self.message)
 
 
-# 指定されたAPKMirrorのURLからアプリのバージョン一覧を取得する
+# Fetches the list of app versions from the specified APKMirror URL
 def get_versions(url: str) -> list[Version]:
     response = get_scraper().get(url)
     if response.status_code != 200:
@@ -57,7 +57,7 @@ def get_versions(url: str) -> list[Version]:
     return out
 
 
-# バリアントリンクからAPKファイルをダウンロードする
+# Downloads the APK file from the variant link
 def download_apk(variant: Variant, path: str = "big_file.apkm"):
     url = variant.link
 
@@ -73,10 +73,10 @@ def download_apk(variant: Variant, path: str = "big_file.apkm"):
 
     download_page_link = f"https://www.apkmirror.com/{cast(Tag, download_button).attrs['href']}"
 
-    # 次のダウンロードページへ遷移
+    # Navigate to the next download page
     download_page = get_scraper().get(download_page_link)
     
-    # 【修正】response ではなく download_page のステータスを確認
+    # [FIX] Check status of download_page instead of response
     if download_page.status_code != 200:
         raise FailedToFetch(download_page_link)
 
@@ -98,7 +98,7 @@ def download_apk(variant: Variant, path: str = "big_file.apkm"):
     )
 
 
-# 指定されたバージョンの利用可能なバリアント（アーキテクチャ、バンドル形式）を取得する
+# Fetches available variants (architectures, bundle format) for the specified version
 def get_variants(version: Version) -> list[Variant]:
     url = version.link
     variants_page = get_scraper().get(url)

@@ -2,14 +2,14 @@ import requests
 from dataclasses import dataclass
 
 
-# GitHubリリースの各アセット（ダウンロードファイル）の情報を保持するデータクラス
+# Data class representing each asset (download file) in a GitHub release
 @dataclass
 class Asset:
     browser_download_url: str
     name: str
 
 
-# GitHubリリースの全体情報（タグ名、URL、アセット一覧、本文）を保持するデータクラス
+# Data class representing overall GitHub release details (tag name, URL, asset list, body)
 @dataclass
 class GithubRelease:
     tag_name: str
@@ -18,12 +18,12 @@ class GithubRelease:
     body: str | None = ""
 
 
-# 指定したGitHubリポジトリ（例: "monsivamon/twitter-apk"）の最新リリース情報を取得する。
-# まだ一度もリリースされていない場合（404）などは None を返す。
+# Fetches the latest release information for the specified GitHub repository (e.g., "monsivamon/twitter-apk").
+# Returns None if no release exists yet (e.g. 404).
 def get_last_build_version(repo_url: str) -> GithubRelease | None:
     url = f"https://api.github.com/repos/{repo_url}/releases/latest"
     
-    # HTTPヘッダーなしでシンプルにリクエスト
+    # Simple request without custom HTTP headers
     response = requests.get(url)
 
     if response.status_code == 200:
@@ -44,5 +44,5 @@ def get_last_build_version(repo_url: str) -> GithubRelease | None:
             body=release.get("body", "")
         )
     
-    # 200以外（404など）の場合は何も返さない（None）
+    # Return None for non-200 responses (e.g., 404)
     return None

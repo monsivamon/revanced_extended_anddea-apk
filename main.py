@@ -13,7 +13,7 @@ from apkmirror import Version, Variant
 from utils import patch_apk, merge_apk 
 from download_bins import download_apkeditor, download_morphe_cli
 
-# 外部ライブラリによるプロセス強制終了を例外に変換して安全に捕捉可能にする
+# Convert process exit calls by external libraries to an exception so they can be safely caught
 class ProcessExitException(BaseException): pass
 def prevent_exit(code=0):
     raise ProcessExitException(f"Process exit prevented! (exit code {code})")
@@ -21,12 +21,12 @@ def prevent_exit(code=0):
 sys.exit = prevent_exit
 os._exit = prevent_exit
 
-# 致命的なエラーメッセージを標準エラー出力に流して安全に処理を終了する
+# Print fatal error message to stderr and terminate safely
 def panic(msg):
     print(f"  -> [FATAL] {msg}", file=sys.stderr)
     raise ProcessExitException(msg)
 
-# プレリリースを含むバージョン文字列を数値的に比較し、v1がv2より新しければTrueを返す
+# Compare version strings including prereleases numerically; returns True if v1 is newer than v2
 def version_greater(v1: str | None, v2: str | None) -> bool:
     if not v1: return False
     if not v2: return True
@@ -53,7 +53,7 @@ def version_greater(v1: str | None, v2: str | None) -> bool:
             return p1 > p2 if type(p1) == type(p2) else str(p1) > str(p2)
     return len(pre1) > len(pre2)
 
-# リポジトリのリリース一覧を取得し、バージョン文字列でソートして最新のStableとPre-releaseを返す
+# Retrieve repository release history, sort by version string, and return the latest Stable and Pre-release
 def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
     import json
     print(f"  -> Fetching release history for {repo}...")
@@ -95,7 +95,7 @@ def get_latest_releases(repo: str, require_mpp: bool = False) -> dict:
         "pre": valid_pre[0] if valid_pre else None
     }
 
-# GitHubリリースを作成または既存のリリースにアセットを追記する
+# Create a GitHub release or append assets to an existing release
 def publish_github_release(tag_name: str, files: list, message: str, title: str, is_prerelease: bool):
     print(f"  -> Attempting to publish/upload to {tag_name}...")
     check_cmd = ["gh", "release", "view", tag_name]
@@ -114,11 +114,11 @@ def publish_github_release(tag_name: str, files: list, message: str, title: str,
             print("  -> Create failed (likely race condition). Falling back to upload...")
             subprocess.run(["gh", "release", "upload", tag_name] + files + ["--clobber"], check=True)
 
-# CLIのテキスト出力を解析し、以前のJSONと全く同じ構造のメタデータを生成する
+# Parse CLI text output and generate metadata with the exact same structure as previous JSON format
 def extract_patches_metadata(cli_path: str, mpp_path: str) -> list:
     print(f"  -> Extracting patch list dynamically from {mpp_path} via CLI (Text Parsing Mode)...")
     
-    # 新しい list-patches コマンドを使用（-p: パッケージ名, -v: バージョン情報 を出力）
+    # Use new list-patches command (outputs -p: package name, -v: version information)
     cmd = ["java", "-jar", cli_path, "list-patches", f"--patches={mpp_path}", "-p", "-v"]
     
     try:
@@ -134,25 +134,25 @@ def extract_patches_metadata(cli_path: str, mpp_path: str) -> list:
     current_package = None
     in_versions = False
 
-    # 1行ずつテキストを解析してパッチ構造を復元
+    # Parse text line-by-line to reconstruct patch structure
     for line in out.splitlines():
         s_line = line.strip()
         
         if not s_line:
             continue
 
-        # 新しいパッチブロックの開始
+        # Start of a new patch block
         if s_line.startswith('Index:'):
             current_patch = {"name": "", "compatiblePackages": []}
             patches.append(current_patch)
             current_package = None
             in_versions = False
             
-        # パッチ名の抽出
+        # Extract patch name
         elif s_line.startswith('Name:') and current_patch is not None:
             current_patch["name"] = s_line[5:].strip()
             
-        # 対象パッケージ名の抽出
+        # Extract target package name
         elif s_line.startswith('Package name:'):
             pkg_name = s_line.split('Package name:', 1)[1].strip()
             current_package = {"name": pkg_name, "versions": []}
@@ -160,16 +160,16 @@ def extract_patches_metadata(cli_path: str, mpp_path: str) -> list:
                 current_patch["compatiblePackages"].append(current_package)
             in_versions = False
             
-        # バージョンリストの開始フラグ
+        # Flag indicating start of version list
         elif s_line.startswith('Compatible versions:'):
             in_versions = True
             
-        # バージョン番号の抽出（フラグが立っており、数字で始まる行）
+        # Extract version number (lines starting with a digit when flag is set)
         elif in_versions and current_package is not None:
             if s_line[0].isdigit():
                 current_package["versions"].append(s_line)
             else:
-                # 数字以外が来たらバージョンリストの終了とみなす
+                # Non-digit line indicates end of version list
                 in_versions = False
 
     if not patches:
@@ -178,7 +178,7 @@ def extract_patches_metadata(cli_path: str, mpp_path: str) -> list:
     return patches
 
 
-# 対象アプリがサポートするAPKバージョンのリストを抽出し、直近5件を古い順にソートして返す
+# Extract supported APK versions for target app, sorting the 5 most recent in ascending order
 def get_supported_versions(patches_list: list, package_name: str) -> list:
     versions_set = set()
     for patch in patches_list:
@@ -197,7 +197,7 @@ def get_supported_versions(patches_list: list, package_name: str) -> list:
     return sorted_versions[-5:]
 
 
-# 指定されたAPKバージョンと互換性のあるすべてのパッチを抽出する
+# Extract all patches compatible with the specified APK version
 def get_patches_for_version(patches_list: list, package_name: str, target_version: str) -> list:
     patches = []
     for patch in patches_list:
@@ -205,7 +205,7 @@ def get_patches_for_version(patches_list: list, package_name: str, target_versio
         compat = patch.get("compatiblePackages")
 
         supports_version = False
-        # Universal パッチ (対象パッケージの指定がないもの)
+        # Universal patches (no target package specified)
         if not compat: 
             supports_version = True
         elif isinstance(compat, dict) and package_name in compat:
@@ -224,7 +224,7 @@ def get_patches_for_version(patches_list: list, package_name: str, target_versio
     return patches
 
 
-# APKMirrorをスクレイピングし、指定バージョンのダウンロード可能なVariantを取得する
+# Scrape APKMirror to retrieve downloadable Variant for specified version
 def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> tuple[Version | None, Variant | None]:
     if not target_version: return None, None
     slug_version = target_version.replace('.', '-')
@@ -254,7 +254,7 @@ def get_target_apk_variant(base_url: str, target_version: str, app_id: str) -> t
     return None, None
 
 
-# Morphe CLI を使用してベースAPKにパッチを適用（includes で全パッチを強制）
+# Apply patches to base APK using Morphe CLI (force apply all patches via includes)
 def build_target_apk(target_name: str, version: str, patches_to_apply: list, input_apk: str):
     patches = "bins/patches.mpp"
     cli = "bins/morphe-cli.jar"
@@ -262,7 +262,7 @@ def build_target_apk(target_name: str, version: str, patches_to_apply: list, inp
     output_apk = f"{target_name}-rvx-v{version}.apk"
     print(f"  -> Building {output_apk} (Force applying ALL {len(patches_to_apply)} compatible patches)...")
     
-    # 抽出したリストをincludesに渡して全パッチを強制適用する
+    # Pass extracted list to includes to force application of all patches
     patch_apk(cli, patches, input_apk, includes=patches_to_apply, excludes=[], out=output_apk)
     
     if not os.path.exists(output_apk): panic(f"Failed to build {output_apk}")
@@ -270,7 +270,7 @@ def build_target_apk(target_name: str, version: str, patches_to_apply: list, inp
     return output_apk
 
 
-# ビルド環境の不要な一時ファイルや過去のAPKを削除してクリーンアップする
+# Clean up build environment by removing unnecessary temporary files and past APKs
 def clean_workspace():
     for f in ["youtube_base.apk", "youtube_base.apkm", "youtube_base_merged.apk", "ytmusic_base.apk", "ytmusic_base.apkm", "ytmusic_base_merged.apk", "bins/patches.mpp"]:
         if os.path.exists(f): os.remove(f)
@@ -278,7 +278,7 @@ def clean_workspace():
         if f.endswith(".apk") and "rvx-v" in f: os.remove(f)
 
 
-# サポートバージョンを最新から順に試行し、ブロックされた場合は古いバージョンへフォールバックしてダウンロードする
+# Try supported versions starting from newest, fallback to older versions if blocked
 def download_with_fallback(app_id: str, base_url: str, supported_versions: list):
     for version in reversed(supported_versions): 
         print(f"\n  -> [FALLBACK ROUTINE] Trying to fetch v{version} for {app_id}...")
@@ -312,7 +312,7 @@ def download_with_fallback(app_id: str, base_url: str, supported_versions: list)
     return None, None
 
 
-# パッチの取得からAPKのダウンロード、パッチ適用、GitHubリリース作成までの一連のパイプライン処理
+# Pipeline process for fetching patches, downloading APK, applying patches, and creating GitHub release
 def process(tag: str, is_pre: bool, target_app: str):
     print(f"\n=======================================================")
     print(f"INITIATING BUILD PIPELINE FOR: {tag} ({target_app.upper()})")
@@ -326,7 +326,7 @@ def process(tag: str, is_pre: bool, target_app: str):
     download_morphe_cli()
 
     # ---------------------------------------------------------
-    # テキスト出力からJSONメタデータを復元
+    # Restore JSON metadata from text output
     # ---------------------------------------------------------
     patches_list = extract_patches_metadata("bins/morphe-cli.jar", "bins/patches.mpp")
     if not patches_list:
@@ -347,7 +347,7 @@ def process(tag: str, is_pre: bool, target_app: str):
         yt_input, final_yt_ver = download_with_fallback("youtube", yt_url, yt_versions)
         if yt_input and final_yt_ver:
             try:
-                # 互換性のある全パッチを取得
+                # Retrieve all compatible patches
                 yt_patches = get_patches_for_version(patches_list, "com.google.android.youtube", final_yt_ver)
                 out = build_target_apk("youtube", final_yt_ver, yt_patches, yt_input)
                 outputs.append(out)
@@ -365,7 +365,7 @@ def process(tag: str, is_pre: bool, target_app: str):
         ytm_input, final_ytm_ver = download_with_fallback("youtube-music", ytm_url, ytm_versions)
         if ytm_input and final_ytm_ver:
             try:
-                # 互換性のある全パッチを取得
+                # Retrieve all compatible patches
                 ytm_patches = get_patches_for_version(patches_list, "com.google.android.apps.youtube.music", final_ytm_ver)
                 out = build_target_apk("ytmusic", final_ytm_ver, ytm_patches, ytm_input)
                 outputs.append(out)
@@ -386,7 +386,7 @@ def process(tag: str, is_pre: bool, target_app: str):
     print("  -> [DONE] Release successfully published!")
 
 
-# 引数を解釈して上流と自リポジトリのバージョンを比較し、更新があればビルドを開始する
+# Parse arguments, compare upstream and local repository versions, and trigger build if updates exist
 def main():
     parser = argparse.ArgumentParser(description="RVX Auto Builder")
     parser.add_argument("--app", choices=["youtube", "ytmusic", "all"], default="all", help="Which app to build")
