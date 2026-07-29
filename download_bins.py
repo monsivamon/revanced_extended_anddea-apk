@@ -3,23 +3,23 @@ import re
 from utils import download
 
 
-# GitHubのリポジトリから、正規表現に一致するアセット（ファイル）を検索してダウンロードする共通関数。
-# 最新版（または指定バージョン、プレリリース等）の条件に合うリリースを特定して取得する。
+# Helper function to search for and download an asset matching a regular expression from a GitHub repository releases.
+# Identifies and retrieves a release matching criteria (latest version, specified version, prereleases, etc.).
 def download_release_asset(repo: str, regex: str, out_dir: str, filename=None, include_prereleases: bool = False, version=None):
     url = f"https://api.github.com/repos/{repo}/releases"
 
-    # ヘッダーなしでシンプルにリクエスト
+    # Simple request without custom HTTP headers
     response = requests.get(url)
     if response.status_code != 200:
         raise Exception(f"Failed to fetch GitHub releases for {repo}")
 
-    # プレリリースを含めるかどうかのフィルタリング
+    # Filter whether to include prereleases
     releases = [r for r in response.json() if include_prereleases or not r.get("prerelease")]
 
     if not releases:
         raise Exception(f"No releases found for {repo}")
 
-    # バージョン指定がある場合はさらに絞り込む
+    # Filter further if a specific version is requested
     if version is not None:
         releases = [r for r in releases if r.get("tag_name") == version]
 
@@ -37,25 +37,25 @@ def download_release_asset(repo: str, regex: str, out_dir: str, filename=None, i
                 filename = i["name"]
             break
 
-    # 該当するファイルが見つからなかった場合の安全対策
+    # Safety check if matching file was not found
     if link is None:
         raise Exception(f"No asset matching regex '{regex}' found in release.")
 
-    # utils.pyのdownload関数を呼び出して保存
+    # Save file by calling download function from utils.py
     download(link, f"{out_dir.lstrip('/')}/{filename}")
 
     return latest_release
 
 
-# APKEditorをダウンロードする。
-# 複数APKのマージ（.apkm → .apk）に使用する。
+# Downloads APKEditor.
+# Used for merging multiple APKs (.apkm -> .apk).
 def download_apkeditor():
     print("Downloading APKEditor...")
     download_release_asset("REAndroid/APKEditor", "APKEditor", "bins", "apkeditor.jar")
 
 
-# Morphe CLIをダウンロードする。
-# APKへのパッチ適用（.mppファイルの実行）に使用する。
+# Downloads Morphe CLI.
+# Used for patching APKs (executing .mpp files).
 def download_morphe_cli():
     print("Downloading Morphe CLI...")
     download_release_asset(
