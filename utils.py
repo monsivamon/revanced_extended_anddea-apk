@@ -67,7 +67,7 @@ def merge_apk(path: str):
         ["java", "-jar", "./bins/apkeditor.jar", "m", "-extractNativeLibs", "true", "-i", path]
     ).check_returncode()
 
-# Apply patches and sign using Morphe CLI, moving generated artifact to target path
+# Apply patches and sign using Morphe CLI, outputting the generated artifact directly to target path
 def patch_apk(
     cli: str,
     patches: str,
@@ -90,6 +90,10 @@ def patch_apk(
         "--keystore-entry-alias", "jhc",
     ]
 
+    # Add output file parameter if specified to avoid relying on file search logic
+    if out is not None:
+        command += ["-o", out]
+
     for i in includes:
         command += ["-e", i]
     for e in excludes:
@@ -110,26 +114,11 @@ def patch_apk(
         print("------------------------", file=sys.stderr)
         result.check_returncode()
 
+    # Verify the CLI successfully generated the file at the specified output path
     if out is not None:
-        base_name = os.path.splitext(apk)[0]
-        
-        # Search recursively for generated output ignoring case sensitivity
-        all_apks = glob.glob("**/*.apk", recursive=True)
-        found_files = [
-            f for f in all_apks 
-            if base_name in os.path.basename(f) and "morphe" in os.path.basename(f).lower()
-        ]
-
-        if not found_files:
-            panic(f"Expected CLI output not found for: {base_name}")
-
-        cli_output = found_files[0]
-        print(f"  -> [DEBUG] Detected generated APK: {cli_output}")
-
-        if os.path.exists(out):
-            os.unlink(out)
-
-        shutil.move(cli_output, out)
+        if not os.path.exists(out):
+            panic(f"Expected CLI output not found at: {out}")
+        print(f"  -> [DEBUG] Detected generated APK: {out}")
 
 # Create GitHub release using GitHub CLI (including deletion and recreation of existing releases)
 def publish_release(tag: str, files: list[str], message: str, title=""):
