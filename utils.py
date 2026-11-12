@@ -7,15 +7,55 @@ import glob
 
 _scraper = None
 
+# Check if the response is a Cloudflare challenge page (HTTP 200 with HTML)
+def _is_challenge_page(res) -> bool:
+    if res is None or getattr(res, "status_code", None) != 200:
+        return False
+    try:
+        text = (res.text or "")[:5000]
+    except Exception:
+        return False
+    markers = (
+        "Just a moment", "cf-chl-", "__cf_chl_", "Checking your browser",
+        "Attention Required", "challenge-platform", "cf_chl_opt",
+    )
+    return any(m in text for m in markers)
+
+# Hybrid scraper to bypass Cloudflare/Bot detection
+class _HybridSession:
+    def __init__(self) -> None:
+        import cloudscraper
+        try:
+            self._primary = cloudscraper.create_scraper(enable_stealth=True)
+        except TypeError:
+            self._primary = cloudscraper.create_scraper()
+        self._primary.headers.update({"User-Agent": "APKUpdater-v3.0.3"})
+        self._fallback = None
+        self.headers = self._primary.headers
+        print("[scraper] primary: cloudscraper (stealth + APKUpdater UA)", flush=True)
+
+    def _get_fallback(self):
+        if self._fallback is None:
+            from curl_cffi import requests as curl_requests
+            self._fallback = curl_requests.Session(impersonate="chrome124")
+            print("[scraper] fallback: curl_cffi (Chrome 124 full impersonation)", flush=True)
+        return self._fallback
+
+    def get(self, *args, **kwargs):
+        r = self._primary.get(*args, **kwargs)
+        if r.status_code == 403 or _is_challenge_page(r):
+            reason = "403" if r.status_code == 403 else "challenge page"
+            try: r.close()
+            except Exception: pass
+            print(f"[scraper] primary returned {reason}, retrying with curl_cffi...", flush=True)
+            r = self._get_fallback().get(*args, **kwargs)
+        return r
+
 # Get browser impersonating scraper to bypass Cloudflare/Bot detection
 def get_scraper():
     global _scraper
     if _scraper is None:
-        import cloudscraper
-        _scraper = cloudscraper.create_scraper()
-        _scraper.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        })
+        _scraper = _HybridSession()
     return _scraper
 
 # Print fatal error message and exit the script
@@ -23,31 +63,41 @@ def panic(message: str):
     print(message, file=sys.stderr)
     exit(1)
 
-# Download file from specified URL (impersonates browser via curl_cffi)
+# Download file from specified URL (using hybrid scraper)
 def download(link: str, out: str, headers=None, use_scraper=True):
     if os.path.exists(out):
         print(f"{out} already exists skipping download")
         return
 
-    print("  -> [DEBUG] Downloading with curl_cffi...")
+    print(f"  -> Downloading {link}...")
 
     if headers is None:
         headers = {}
     if "Referer" not in headers:
         headers["Referer"] = "https://www.apkmirror.com/"
 
+    session = get_scraper() if use_scraper else requests
+    r = session.get(link, stream=True, headers=headers)
+    
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP Error {r.status_code} for URL: {link}")
+
+    # Prevent saving HTML challenge pages as APK/APKM
+    chunks = r.iter_content(chunk_size=8192)
     try:
-        from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(link, stream=True, headers=headers, impersonate="chrome")
-        r.raise_for_status()
-    except Exception as e:
-        status = getattr(r, 'status_code', 'Unknown') if 'r' in locals() else 'Unknown'
-        print(f"\n  -> [FATAL ERROR] Download blocked (Status: {status})")
-        print(f"  -> Target: {link}")
-        panic(f"Error details: {e}")
+        first_chunk = next(chunks)
+    except StopIteration:
+        first_chunk = b""
+        
+    if first_chunk:
+        lower_chunk = first_chunk.lower()
+        if b"<html" in lower_chunk or b"<!doctype" in lower_chunk:
+             raise RuntimeError(f"Downloaded file is HTML (challenge page), not an APK/APKM")
 
     with open(out, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
+        if first_chunk:
+            f.write(first_chunk)
+        for chunk in chunks:
             if chunk:
                 f.write(chunk)
 
@@ -90,7 +140,6 @@ def patch_apk(
         "--keystore-entry-alias", "jhc",
     ]
 
-    # Add output file parameter if specified to avoid relying on file search logic
     if out is not None:
         command += ["-o", out]
 
@@ -114,7 +163,6 @@ def patch_apk(
         print("------------------------", file=sys.stderr)
         result.check_returncode()
 
-    # Verify the CLI successfully generated the file at the specified output path
     if out is not None:
         if not os.path.exists(out):
             panic(f"Expected CLI output not found at: {out}")

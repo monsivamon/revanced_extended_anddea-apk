@@ -6,3 +6,6 @@ test.py
 *.apk
 *.apkm
 bins/
+
+all_sources.bat
+all_sources.txt
