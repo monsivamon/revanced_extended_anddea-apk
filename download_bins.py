@@ -1,3 +1,4 @@
+﻿import os
 import requests
 import re
 from utils import download
@@ -8,10 +9,18 @@ from utils import download
 def download_release_asset(repo: str, regex: str, out_dir: str, filename=None, include_prereleases: bool = False, version=None):
     url = f"https://api.github.com/repos/{repo}/releases"
 
-    # Simple request without custom HTTP headers
-    response = requests.get(url)
+    # Attach Token to avoid 403 rate limit on shared runner IPs
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = requests.get(url, headers=headers, timeout=60)
     if response.status_code != 200:
-        raise Exception(f"Failed to fetch GitHub releases for {repo}")
+        raise Exception(f"Failed to fetch GitHub releases for {repo} (HTTP {response.status_code})")
 
     # Filter whether to include prereleases
     releases = [r for r in response.json() if include_prereleases or not r.get("prerelease")]
@@ -41,8 +50,8 @@ def download_release_asset(repo: str, regex: str, out_dir: str, filename=None, i
     if link is None:
         raise Exception(f"No asset matching regex '{regex}' found in release.")
 
-    # Save file by calling download function from utils.py
-    download(link, f"{out_dir.lstrip('/')}/{filename}")
+    # Save file by calling download function from utils.py (bypass APKMirror scraper)
+    download(link, f"{out_dir.lstrip('/')}/{filename}", use_scraper=False)
 
     return latest_release
 

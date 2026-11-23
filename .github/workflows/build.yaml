@@ -1,4 +1,4 @@
-name: Build RVX (Anddea) APKs
+﻿name: Build RVX (Anddea) APKs
 
 on:
   schedule:
@@ -28,10 +28,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          python -m playwright install chromium || true
           
       - name: Run build pipeline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APKMIRROR_PROXY: ${{ secrets.APKMIRROR_PROXY }}
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         run: |
           mkdir -p bins

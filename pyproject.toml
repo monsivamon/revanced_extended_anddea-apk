@@ -1,13 +1,13 @@
-[project]
-name = "twitter-apk"
+﻿[project]
+name = "revanced-extended-anddea-apk"
 version = "0.1.0"
-description = "Add your description here"
+description = "Automated builder for Anddea RVX patched APKs"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "requests>=2.32.3",
-
     "cloudscraper>=1.2.71",
     "curl_cffi>=0.7.0",
+    "playwright>=1.49.0",
 ]

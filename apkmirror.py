@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from typing import cast
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup, Tag
-from utils import download, get_scraper
+from utils import download, get_scraper, resolve_apk_via_translate
 
 
 @dataclass
@@ -75,34 +76,98 @@ def download_apk(variant: Variant, path: str = "big_file.apkm"):
 
     # Navigate to the next download page
     download_page = get_scraper().get(download_page_link)
-    
-    # [FIX] Check status of download_page instead of response
+
     if download_page.status_code != 200:
         raise FailedToFetch(download_page_link)
 
     download_page_body = BeautifulSoup(download_page.content, "html.parser")
 
-    direct_link = download_page_body.find("a", {"rel": "nofollow"})
+    # Prefer rel="nofollow" links pointing to download.php
+    nofollow_links = download_page_body.find_all("a", {"rel": "nofollow"})
+    direct_link = next(
+        (link for link in nofollow_links if "download.php" in (link.get("href") or "")),
+        nofollow_links[0] if nofollow_links else None,
+    )
     if direct_link is None:
         raise FailedToFindElement("download link")
 
     direct_link_href = cast(Tag, direct_link).attrs["href"]
-    direct_link_url = f"https://www.apkmirror.com/{direct_link_href}"
+    if direct_link_href.startswith("http://") or direct_link_href.startswith("https://"):
+        direct_link_url = direct_link_href
+    else:
+        direct_link_url = f"https://www.apkmirror.com/{direct_link_href.lstrip('/')}"
     print(f"Direct link: {direct_link_url}")
 
-    download(
+    # download.php redirects (302) to signed CDN (r2.cloudflarestorage.com).
+    # Handle the redirect manually and fetch the APK binary directly from CDN.
+    response = get_scraper().get(
         direct_link_url,
-        path,
         headers={"Referer": download_page_link},
-        use_scraper=True
+        allow_redirects=False,
+        stream=True,
     )
+    location = response.headers.get("Location") or response.headers.get("location")
+
+    if response.status_code in (301, 302, 303, 307, 308) and location:
+        try:
+            response.close()
+        except Exception:
+            pass
+        if _is_apkmirror_url(location):
+            download(location, path, headers={"Referer": direct_link_url}, use_scraper=True)
+        else:
+            print("  -> APK is served from CDN, downloading directly")
+            download(location, path, headers={"Referer": direct_link_url}, use_scraper=False)
+    elif response.status_code == 200 and "text/html" not in (
+        response.headers.get("Content-Type") or ""
+    ).lower():
+        print("  -> Saving APK from direct response")
+        with open(path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        try:
+            response.close()
+        except Exception:
+            pass
+    else:
+        # If blocked (403 / challenge HTML), resolve the 302 CDN URL via translate relay
+        print(f"  -> HTTP {response.status_code}; resolving CDN URL via relay...")
+        try:
+            response.close()
+        except Exception:
+            pass
+        location = resolve_apk_via_translate(direct_link_url)
+        if not location:
+            print("  -> relay could not resolve; trying headless browser...")
+            try:
+                from browser import get_browser
+                location = get_browser().resolve_redirect(direct_link_url)
+            except Exception as e:
+                print(f"  -> browser fallback failed: {type(e).__name__}: {e}")
+                location = None
+        if not location:
+            raise RuntimeError(f"HTTP Error {response.status_code} for URL: {direct_link_url}")
+        print("  -> APK is served from CDN, downloading directly")
+        download(location, path, headers={"Referer": direct_link_url}, use_scraper=False)
+
+    # Verify ZIP/APK magic bytes to ensure no HTML challenge page was saved
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic != b"PK\x03\x04":
+        raise RuntimeError(f"Downloaded file is not a valid ZIP/APK (magic={magic!r}). URL may be blocked by Cloudflare.")
+
+
+def _is_apkmirror_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "apkmirror.com" or host.endswith(".apkmirror.com")
 
 
 # Fetches available variants (architectures, bundle format) for the specified version
 def get_variants(version: Version) -> list[Variant]:
     url = version.link
     variants_page = get_scraper().get(url)
-    
+
     if variants_page is None or variants_page.status_code != 200:
         raise FailedToFetch(url)
 
@@ -123,8 +188,8 @@ def get_variants(version: Version) -> list[Variant]:
         is_bundle_tag = variant_row.find("span", {"class": "apkm-badge"})
         is_bundle = is_bundle_tag is not None and is_bundle_tag.string.strip() == "BUNDLE"
 
-        architecture: str = cells[1].string
-        
+        architecture: str = cells[1].string if len(cells) > 1 and cells[1].string else ""
+
         link_element = variant_row.find("a", {"class": "accent_color"})
         if link_element is None:
             continue
